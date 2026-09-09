@@ -1,0 +1,12 @@
+# Data files (too large for GitHub)
+data/
+*.csv
+
+# Python virtual environment
+venv/
+__pycache__/
+*.pyc
+
+# Models (large binaries)
+models/*.onnx
+models/*.tflite
