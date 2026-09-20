@@ -131,7 +131,6 @@ print(f"Train std  after scaling (should be ~1): {train_scaled.std():.4f}")
 joblib.dump(scaler, "models/scaler.joblib")
 print("Scaler saved to models/scaler.joblib")
 
-
 # --- Step 5: save the processed splits for Week 3 ---
 import numpy as np
 import os
