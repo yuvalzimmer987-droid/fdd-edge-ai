@@ -29,7 +29,17 @@ SELECTED_SENSORS = [
 
 THRESHOLD_PERCENTILE = 95
 
-n_features = len(SELECTED_SENSORS)
+
+def add_delta_features(df):
+    df = df.copy()
+    df["CT_delta"]  = df["CT_RW_TEMP_1"]   - df["CT_SW_TEMP_1"]
+    df["CHL_delta"] = df["CHL_RW_TEMP_1"]  - df["CHL_SW_TEMP_1"]
+    df["CD_delta"]  = df["CHL_RWCD_TEMP_1"]- df["CHL_SWCD_TEMP_1"]
+    df["CWL_delta"] = df["CWL_SEC_RW_TEMP"]- df["CWL_SEC_SW_TEMP"]
+    return df
+
+
+n_features = len(SELECTED_SENSORS) + 4  # 15 מקוריים + 4 deltas
 model = Autoencoder(n_features)
 model.load_state_dict(torch.load("models/autoencoder_best.pt"))
 model.eval()
@@ -50,13 +60,15 @@ print("Calibrating per-sensor thresholds on validation set...")
 
 val = np.load("data/processed/val.npy")
 val_tensor = torch.tensor(val, dtype=torch.float32)
-val_errors = get_per_sensor_errors(val_tensor)  # (N, 15)
+val_errors = get_per_sensor_errors(val_tensor)  # (N, 19)
 
 # לכל חיישן — סף בנפרד על האחוזון ה-95
-thresholds = np.percentile(val_errors, THRESHOLD_PERCENTILE, axis=0)  # (15,)
+thresholds = np.percentile(val_errors, THRESHOLD_PERCENTILE, axis=0)  # (19,)
+
+ALL_FEATURES = SELECTED_SENSORS + ["CT_delta", "CHL_delta", "CD_delta", "CWL_delta"]
 
 print(f"\nPer-sensor thresholds (p{THRESHOLD_PERCENTILE}):")
-for name, thr in zip(SELECTED_SENSORS, thresholds):
+for name, thr in zip(ALL_FEATURES, thresholds):
     print(f"  {name:25s}: {thr:.6f}")
 
 # --- הערכה על test_normal ---
@@ -81,7 +93,7 @@ for _, row in fault_files.iterrows():
     if not os.path.exists(path):
         continue
 
-    df     = pd.read_csv(path, usecols=SELECTED_SENSORS)
+    df     = add_delta_features(pd.read_csv(path, usecols=SELECTED_SENSORS))
     scaled = scaler.transform(df)
     tensor = torch.tensor(scaled, dtype=torch.float32)
 

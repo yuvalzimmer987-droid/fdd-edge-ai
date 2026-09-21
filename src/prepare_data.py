@@ -85,6 +85,19 @@ print(catalog_df[catalog_df['label'] == 'fault']['fault_type'].value_counts())
 catalog_df.to_csv("data/file_catalog.csv", index=False)
 print("\nCatalog saved to data/file_catalog.csv")
 
+# --- Step 2c: add delta features (temperature differences between supply/return) ---
+def add_delta_features(df):
+    """מוסיף עמודות הפרש טמפרטורה — רגישות לתקלות לכלוך."""
+    df = df.copy()
+    df["CT_delta"]  = df["CT_RW_TEMP_1"]   - df["CT_SW_TEMP_1"]    # מגדל קירור
+    df["CHL_delta"] = df["CHL_RW_TEMP_1"]  - df["CHL_SW_TEMP_1"]   # מצנן
+    df["CD_delta"]  = df["CHL_RWCD_TEMP_1"]- df["CHL_SWCD_TEMP_1"] # קונדנסר
+    df["CWL_delta"] = df["CWL_SEC_RW_TEMP"]- df["CWL_SEC_SW_TEMP"] # מעגל משני
+    return df
+
+df = add_delta_features(df)
+print(f"Features after adding deltas: {df.shape[1]} (was 15, now {df.shape[1]})")
+
 # --- Step 3: chronological split of the fault-free data ---
 print("\n--- Splitting fault-free data (chronological 70/15/15) ---")
 
