@@ -27,7 +27,7 @@ SELECTED_SENSORS = [
     "CHL_CW_FLOW_1", "CWL_SEC_DP", "CHL_STA_1",
 ]
 
-THRESHOLD_PERCENTILE = 95
+THRESHOLD_PERCENTILE = 98
 
 
 def add_delta_features(df):
