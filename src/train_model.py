@@ -179,7 +179,7 @@ print(f"  (ideal: close to {100 - THRESHOLD_PERCENTILE}% false-alarm rate)")
 import joblib
 import pandas as pd
 
-FAULT_FILE = "data/LBNL_FDD_Data_Sets_Chiller_Plant/ChillerPlant_chiller_fouling_095.csv"
+FAULT_FILE = "data/LBNL_FDD_Data_Sets_Chiller_Plant/ChillerPlant_bypass_leakage_075.csv"
 
 SELECTED_SENSORS = [
     "CHL_SW_TEMP_1", "CHL_RW_TEMP_1", "CHL_SWCD_TEMP_1", "CHL_RWCD_TEMP_1",
@@ -199,7 +199,7 @@ if os.path.exists(FAULT_FILE):
         fault_errors = ((fault_tensor - fault_recon) ** 2).mean(dim=1).numpy()
 
     flags_fault = (fault_errors > threshold).sum()
-    print(f"\n--- Evaluation on fault file: coolingtower_fouling_095 ---")
+    print(f"\n--- Evaluation on fault file: {os.path.basename(FAULT_FILE)} ---")
     print(f"Fault samples:        {len(fault_errors)}")
     print(f"Detected as anomaly:  {flags_fault} ({flags_fault / len(fault_errors) * 100:.1f}%)")
     print(f"Mean fault error:     {fault_errors.mean():.6f} (vs threshold {threshold:.6f})")
