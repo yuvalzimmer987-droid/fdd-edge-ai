@@ -188,9 +188,17 @@ SELECTED_SENSORS = [
     "CHL_CW_FLOW_1", "CWL_SEC_DP", "CHL_STA_1",
 ]
 
+def add_delta_features(df):
+    df = df.copy()
+    df["CT_delta"]  = df["CT_RW_TEMP_1"]   - df["CT_SW_TEMP_1"]
+    df["CHL_delta"] = df["CHL_RW_TEMP_1"]  - df["CHL_SW_TEMP_1"]
+    df["CD_delta"]  = df["CHL_RWCD_TEMP_1"]- df["CHL_SWCD_TEMP_1"]
+    df["CWL_delta"] = df["CWL_SEC_RW_TEMP"]- df["CWL_SEC_SW_TEMP"]
+    return df
+
 if os.path.exists(FAULT_FILE):
     scaler = joblib.load("models/scaler.joblib")
-    fault_df = pd.read_csv(FAULT_FILE, usecols=SELECTED_SENSORS)
+    fault_df = add_delta_features(pd.read_csv(FAULT_FILE, usecols=SELECTED_SENSORS))
     fault_scaled = scaler.transform(fault_df)
     fault_tensor = torch.tensor(fault_scaled, dtype=torch.float32)
 
