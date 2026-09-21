@@ -179,7 +179,7 @@ print(f"  (ideal: close to {100 - THRESHOLD_PERCENTILE}% false-alarm rate)")
 import joblib
 import pandas as pd
 
-FAULT_FILE = "data/LBNL_FDD_Data_Sets_Chiller_Plant/ChillerPlant_coolingtower_fouling_095.csv"
+FAULT_FILE = "data/LBNL_FDD_Data_Sets_Chiller_Plant/ChillerPlant_chiller_fouling_095.csv"
 
 SELECTED_SENSORS = [
     "CHL_SW_TEMP_1", "CHL_RW_TEMP_1", "CHL_SWCD_TEMP_1", "CHL_RWCD_TEMP_1",
