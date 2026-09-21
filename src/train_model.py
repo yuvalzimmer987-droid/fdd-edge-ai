@@ -146,7 +146,7 @@ with torch.no_grad():
 
 # Use the 95th percentile of normal validation errors as the threshold.
 # Samples above this will be flagged as anomalies.
-THRESHOLD_PERCENTILE = 90
+THRESHOLD_PERCENTILE = 95
 threshold = float(np.percentile(val_errors, THRESHOLD_PERCENTILE))
 
 print(f"Validation reconstruction errors:")
