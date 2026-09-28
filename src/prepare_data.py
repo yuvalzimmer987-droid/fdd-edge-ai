@@ -13,6 +13,13 @@ SELECTED_SENSORS = [
 # --- Step 1: confirm completeness of the fault-free file ---
 print("Loading fault-free file...")
 df = pd.read_csv(FAULT_FREE_FILE, usecols=SELECTED_SENSORS)
+# In the source file OA_TEMP and OA_TEMP_WB are swapped: the column named
+# OA_TEMP_WB is higher than OA_TEMP in 97% of rows (and never lower), but a
+# wet-bulb can never exceed the dry-bulb. Swap the names back.
+# (check_wet_bulb.py shows the evidence.) Fault files need the same fix.
+df = df.rename(columns={"OA_TEMP": "OA_TEMP_WB", "OA_TEMP_WB": "OA_TEMP"})
+assert (df["OA_TEMP_WB"] <= df["OA_TEMP"] + 0.5).all(), "wet-bulb above dry-bulb"
+
 # usecols keeps the file's column order - force our own, fixed order
 df = df[SELECTED_SENSORS]
 
