@@ -3,7 +3,7 @@ import torch
 import random
 
 # Fix random seeds for reproducibility — prevents the Dropout lottery on every run
-SEED = 42
+SEED = 0
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)

@@ -66,6 +66,8 @@ val_errors = get_per_sensor_errors(val_tensor)  # (N, 19)
 
 # לכל חיישן — סף בנפרד על האחוזון ה-95
 thresholds = np.percentile(val_errors, THRESHOLD_PERCENTILE, axis=0)  # (19,)
+# prevent zero thresholds (happens when a sensor has near-constant normal values)
+thresholds = np.maximum(thresholds, 1e-6)
 
 ALL_FEATURES = SELECTED_SENSORS + ["CT_delta", "CHL_delta", "CD_delta", "CWL_delta"]
 
