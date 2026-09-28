@@ -94,20 +94,41 @@ print(catalog_df[catalog_df['label'] == 'fault']['fault_type'].value_counts())
 catalog_df.to_csv("data/file_catalog.csv", index=False)
 print("\nCatalog saved to data/file_catalog.csv")
 
-# --- Step 3: chronological split of the fault-free data ---
-print("\n--- Splitting fault-free data (chronological 70/15/15) ---")
+# --- Step 3: split the fault-free data by whole days (70/15/15) ---
+# The file is one year of 1-minute data. A plain chronological 70/15/15 split
+# put Jan-Sep in train and only Nov-Dec (winter) in test, so each split saw a
+# different season. Instead, each whole day goes to one split at random:
+# every split covers the whole year, and rows inside a day stay together.
+import numpy as np
 
-# df already holds the fault-free data (loaded in Step 1), in time order
-n = len(df)
-train_end = int(n * 0.70)
-val_end   = int(n * 0.85)   # 70% + 15%
+print("\n--- Splitting fault-free data (whole days, 70/15/15) ---")
 
-# Chronological slices - NO shuffling (order = time)
-train_df = df.iloc[:train_end]
-val_df   = df.iloc[train_end:val_end]
-test_normal_df = df.iloc[val_end:]
+ROWS_PER_DAY = 1440          # 1-minute data
+RUNNING_THRESHOLD = 5.0      # kW - CHL_POW_1 above this = chiller is cooling
 
-print(f"Total fault-free rows: {n}")
+# Day number of each row, computed on the full (unfiltered) time order
+day = np.arange(len(df)) // ROWS_PER_DAY
+n_days = day.max() + 1
+
+rng = np.random.default_rng(42)   # fixed seed -> same split every run
+day_split = rng.choice(["train", "val", "test"], size=n_days, p=[0.70, 0.15, 0.15])
+row_split = day_split[day]
+
+# Keep only rows where the chiller is actually cooling.
+# CHL_POW_1 is ~0 kW (plant off, 5.5% of rows) or ~1.94 kW (standby, about
+# half the year) when the chiller is not cooling. Those rows are trivial for
+# the autoencoder and would dominate training. Faults are detected in running
+# mode only; at inference, rows below RUNNING_THRESHOLD are skipped.
+running = (df["CHL_POW_1"] > RUNNING_THRESHOLD).to_numpy()
+print(f"Rows with chiller running (> {RUNNING_THRESHOLD} kW): "
+      f"{running.sum()} of {len(df)} ({running.mean()*100:.0f}%)")
+
+train_df = df[running & (row_split == "train")]
+val_df   = df[running & (row_split == "val")]
+test_normal_df = df[running & (row_split == "test")]
+
+n = running.sum()
+print(f"Total fault-free running rows: {n}")
 print(f"  Train:       {len(train_df):>7} rows ({len(train_df)/n*100:.0f}%)")
 print(f"  Validation:  {len(val_df):>7} rows ({len(val_df)/n*100:.0f}%)")
 print(f"  Test-normal: {len(test_normal_df):>7} rows ({len(test_normal_df)/n*100:.0f}%)")
