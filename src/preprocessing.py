@@ -11,6 +11,12 @@ SELECTED_SENSORS = [
     "CWL_SEC_SW_TEMP", "CWL_SEC_RW_TEMP", "CT_SW_TEMP_1", "CT_RW_TEMP_1",
     "OA_TEMP", "OA_TEMP_WB", "CHL_POW_1", "CT_POW_1",
     "CHL_CW_FLOW_1", "CWL_SEC_DP", "CHL_STA_1",
+    # Controller / actuator outputs. When a controller compensates a fault,
+    # the measured value returns to its setpoint and the fault only shows in
+    # what the controller does (check_fault_signatures.py, train + val days):
+    # a positive pressure bias slows the secondary pumps, and a badly tuned
+    # cooling-tower controller makes the three-way valve signal oscillate.
+    "CWL_SEC_PM_SPD_1", "CWL_SEC_PM_SPD_2", "TWV_CTRL",
 ]
 
 ROWS_PER_DAY = 1440          # 1-minute data

@@ -117,8 +117,14 @@ results = []
 for _, row in fault_files.iterrows():
     df = load_plant_file(f"{DATA_DIR}/{row['filename']}")
     keep, _, _, _ = steady_state_mask(df)
-    mask = keep & (day_split(len(df)) == "test")
+    split = day_split(len(df))
 
+    # Validation days: only used to compare model versions (e.g. which
+    # sensors to use), so that such choices never look at the test days
+    val_mask = keep & (split == "val")
+    _, val_win_det, _, _ = evaluate(np.flatnonzero(val_mask), scaler.transform(df.loc[val_mask, sensors]))
+
+    mask = keep & (split == "test")
     idx = np.flatnonzero(mask)
     x = scaler.transform(df.loc[mask, sensors])
     row_det, win_det, _, top_sensor = evaluate(idx, x)
@@ -133,6 +139,7 @@ for _, row in fault_files.iterrows():
         "rows": len(idx),
         "row_detection_pct": round(row_det, 2),
         "window_detection_pct": round(win_det, 2),
+        "val_days_window_detection_pct": round(val_win_det, 2),
         "top_sensor": top_sensor,
     })
 
@@ -148,4 +155,6 @@ print(summary.sort_values("hour det. %", ascending=False).round(1).to_string())
 print(f"\nFalse alarm rate:  rows {fa_row:.2f}%   windows {fa_win:.2f}%")
 print(f"Mean detection:    rows {results_df['row_detection_pct'].mean():.1f}%   "
       f"windows {results_df['window_detection_pct'].mean():.1f}%")
+print(f"\nFor comparing model versions - mean hourly detection on VALIDATION days: "
+      f"{results_df['val_days_window_detection_pct'].mean():.1f}%")
 print("\nResults saved to data/fault_results.csv")
