@@ -105,6 +105,8 @@ print("\n--- Splitting fault-free data (whole days, 70/15/15) ---")
 
 ROWS_PER_DAY = 1440          # 1-minute data
 RUNNING_THRESHOLD = 5.0      # kW - CHL_POW_1 above this = chiller is cooling
+WARMUP_DAYS = 1              # skip the first day (simulation start-up)
+STARTUP_MINUTES = 30         # skip the first minutes after each chiller start
 
 # Day number of each row, computed on the full (unfiltered) time order
 day = np.arange(len(df)) // ROWS_PER_DAY
@@ -123,12 +125,28 @@ running = (df["CHL_POW_1"] > RUNNING_THRESHOLD).to_numpy()
 print(f"Rows with chiller running (> {RUNNING_THRESHOLD} kW): "
       f"{running.sum()} of {len(df)} ({running.mean()*100:.0f}%)")
 
-train_df = df[running & (row_split == "train")]
-val_df   = df[running & (row_split == "val")]
-test_normal_df = df[running & (row_split == "test")]
+# Steady state only. check_val_errors.py showed that the worst-reconstructed
+# rows are (1) day 0, where OA_TEMP / OA_TEMP_WB caused 73% of the error:
+# the chiller runs on a cold January day right at the simulation start, a
+# state that does not occur anywhere else; and (2) the first ~30 minutes after
+# each chiller start (38% of the worst rows vs 10% of all rows), when the
+# sensors have not settled yet. Steady-state filtering is standard in chiller
+# FDD; at inference, the same rows are skipped.
+run_id = np.cumsum(~running)
+minutes_running = pd.Series(running.astype(int)).groupby(run_id).cumsum().to_numpy()
+startup = running & (minutes_running <= STARTUP_MINUTES)
+warmup = running & (day < WARMUP_DAYS)
+print(f"  skipped - first {WARMUP_DAYS} day(s) (simulation warm-up): {warmup.sum()} rows")
+print(f"  skipped - first {STARTUP_MINUTES} min after a chiller start: {(startup & ~warmup).sum()} rows")
 
-n = running.sum()
-print(f"Total fault-free running rows: {n}")
+keep = running & ~startup & ~warmup
+
+train_df = df[keep & (row_split == "train")]
+val_df   = df[keep & (row_split == "val")]
+test_normal_df = df[keep & (row_split == "test")]
+
+n = keep.sum()
+print(f"Total fault-free steady-state rows: {n}")
 print(f"  Train:       {len(train_df):>7} rows ({len(train_df)/n*100:.0f}%)")
 print(f"  Validation:  {len(val_df):>7} rows ({len(val_df)/n*100:.0f}%)")
 print(f"  Test-normal: {len(test_normal_df):>7} rows ({len(test_normal_df)/n*100:.0f}%)")
