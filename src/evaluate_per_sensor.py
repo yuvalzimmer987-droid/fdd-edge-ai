@@ -30,6 +30,9 @@ SELECTED_SENSORS = [
 ]
 
 THRESHOLD_PERCENTILE = 98
+# require at least this many sensors to exceed threshold before raising alarm
+# .any() = 1 → P(false alarm) = 1-(0.98)^19 = 32%; k=2 → ~5-6% (real faults hit multiple sensors)
+MIN_SENSORS_TRIGGERED = 2
 
 
 def add_delta_features(df):
@@ -80,8 +83,8 @@ test_normal = np.load("data/processed/test_normal.npy")
 test_tensor = torch.tensor(test_normal, dtype=torch.float32)
 test_errors = get_per_sensor_errors(test_tensor)  # (N, 15)
 
-# שורה = תקלה אם לפחות חיישן אחד חרג מהסף שלו
-flagged = (test_errors > thresholds).any(axis=1)
+# שורה = תקלה אם לפחות MIN_SENSORS_TRIGGERED חיישנים חרגו בו-זמנית
+flagged = (test_errors > thresholds).sum(axis=1) >= MIN_SENSORS_TRIGGERED
 false_alarms = flagged.sum()
 print(f"\nTest-normal: {len(flagged)} samples | false alarm: {false_alarms} ({false_alarms/len(flagged)*100:.1f}%)\n")
 
@@ -102,7 +105,7 @@ for _, row in fault_files.iterrows():
     tensor = torch.tensor(scaled, dtype=torch.float32)
 
     errors   = get_per_sensor_errors(tensor)        # (N, 15)
-    flagged  = (errors > thresholds).any(axis=1)    # True אם אחד מ-15 חרג
+    flagged  = (errors > thresholds).sum(axis=1) >= MIN_SENSORS_TRIGGERED
     detected = flagged.sum()
     detection_rate = detected / len(flagged) * 100
 
