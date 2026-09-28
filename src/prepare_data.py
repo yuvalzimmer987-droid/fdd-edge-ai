@@ -89,14 +89,15 @@ print("\nCatalog saved to data/file_catalog.csv")
 def add_delta_features(df):
     """מוסיף עמודות הפרש טמפרטורה — רגישות לתקלות לכלוך."""
     df = df.copy()
-    df["CT_delta"]  = df["CT_RW_TEMP_1"]   - df["CT_SW_TEMP_1"]    # מגדל קירור
-    df["CHL_delta"] = df["CHL_RW_TEMP_1"]  - df["CHL_SW_TEMP_1"]   # מצנן
-    df["CD_delta"]  = df["CHL_RWCD_TEMP_1"]- df["CHL_SWCD_TEMP_1"] # קונדנסר
-    df["CWL_delta"] = df["CWL_SEC_RW_TEMP"]- df["CWL_SEC_SW_TEMP"] # מעגל משני
+    df["CT_delta"]    = df["CT_RW_TEMP_1"]   - df["CT_SW_TEMP_1"]    # מגדל קירור
+    df["CHL_delta"]   = df["CHL_RW_TEMP_1"]  - df["CHL_SW_TEMP_1"]   # מצנן
+    df["CD_delta"]    = df["CHL_RWCD_TEMP_1"]- df["CHL_SWCD_TEMP_1"] # קונדנסר
+    df["CWL_delta"]   = df["CWL_SEC_RW_TEMP"]- df["CWL_SEC_SW_TEMP"] # מעגל משני
+    df["CT_approach"] = df["CT_SW_TEMP_1"]   - df["OA_TEMP_WB"]      # approach temp (מדד יעילות מגדל)
     return df
 
 df = add_delta_features(df)
-print(f"Features after adding deltas: {df.shape[1]} (was 15, now {df.shape[1]})")
+print(f"Features after adding deltas: {df.shape[1]} (was 15, now {df.shape[1]}) — 15 original + 5 deltas incl. CT_approach")
 
 # --- Step 3: chronological split of the fault-free data ---
 print("\n--- Splitting fault-free data (chronological 70/15/15) ---")

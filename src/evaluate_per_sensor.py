@@ -34,14 +34,15 @@ THRESHOLD_PERCENTILE = 98
 
 def add_delta_features(df):
     df = df.copy()
-    df["CT_delta"]  = df["CT_RW_TEMP_1"]   - df["CT_SW_TEMP_1"]
-    df["CHL_delta"] = df["CHL_RW_TEMP_1"]  - df["CHL_SW_TEMP_1"]
-    df["CD_delta"]  = df["CHL_RWCD_TEMP_1"]- df["CHL_SWCD_TEMP_1"]
-    df["CWL_delta"] = df["CWL_SEC_RW_TEMP"]- df["CWL_SEC_SW_TEMP"]
+    df["CT_delta"]    = df["CT_RW_TEMP_1"]   - df["CT_SW_TEMP_1"]
+    df["CHL_delta"]   = df["CHL_RW_TEMP_1"]  - df["CHL_SW_TEMP_1"]
+    df["CD_delta"]    = df["CHL_RWCD_TEMP_1"]- df["CHL_SWCD_TEMP_1"]
+    df["CWL_delta"]   = df["CWL_SEC_RW_TEMP"]- df["CWL_SEC_SW_TEMP"]
+    df["CT_approach"] = df["CT_SW_TEMP_1"]   - df["OA_TEMP_WB"]
     return df
 
 
-n_features = len(SELECTED_SENSORS) + 4  # 15 מקוריים + 4 deltas
+n_features = len(SELECTED_SENSORS) + 5  # 15 מקוריים + 5 deltas כולל CT_approach
 model = Autoencoder(n_features)
 model.load_state_dict(torch.load("models/autoencoder_best.pt"))
 model.eval()
@@ -67,7 +68,7 @@ val_errors = get_per_sensor_errors(val_tensor)  # (N, 19)
 # לכל חיישן — סף בנפרד על האחוזון ה-95
 thresholds = np.percentile(val_errors, THRESHOLD_PERCENTILE, axis=0)  # (19,)
 
-ALL_FEATURES = SELECTED_SENSORS + ["CT_delta", "CHL_delta", "CD_delta", "CWL_delta"]
+ALL_FEATURES = SELECTED_SENSORS + ["CT_delta", "CHL_delta", "CD_delta", "CWL_delta", "CT_approach"]
 
 print(f"\nPer-sensor thresholds (p{THRESHOLD_PERCENTILE}):")
 for name, thr in zip(ALL_FEATURES, thresholds):
