@@ -185,6 +185,11 @@ np.save("data/processed/train.npy", train_scaled)
 np.save("data/processed/val.npy", val_scaled)
 np.save("data/processed/test_normal.npy", test_normal_scaled)
 
+# Row numbers in the original CSV, so later analysis can go back to raw values
+np.save("data/processed/train_idx.npy", train_df.index.to_numpy())
+np.save("data/processed/val_idx.npy", val_df.index.to_numpy())
+np.save("data/processed/test_normal_idx.npy", test_normal_df.index.to_numpy())
+
 print("\n--- Saved processed splits ---")
 print(f"  train.npy:       {train_scaled.shape}")
 print(f"  val.npy:         {val_scaled.shape}")
