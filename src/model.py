@@ -8,11 +8,12 @@ class Autoencoder(nn.Module):
         super().__init__()
 
         # Encoder: compress n_features -> 8 -> 4 (the bottleneck)
+        # No ReLU on the bottleneck: with only 4 units, a ReLU unit that gets
+        # stuck at 0 ("dead") throws away a quarter of the model's capacity.
         self.encoder = nn.Sequential(
             nn.Linear(n_features, 8),
             nn.ReLU(),
             nn.Linear(8, 4),
-            nn.ReLU(),
         )
 
         # Decoder: reconstruct 4 -> 8 -> n_features

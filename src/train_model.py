@@ -136,4 +136,10 @@ with torch.no_grad():
         print(f"{name:12s} error: mean={errors.mean():.5f}  "
               f"median={np.median(errors):.5f}  99th pct={np.percentile(errors, 99):.5f}")
 
+    # A bottleneck unit that barely changes between rows is not being used
+    codes = model.encoder(torch.tensor(train, dtype=torch.float32)).numpy()
+    unit_std = codes.std(axis=0)
+    print(f"\nBottleneck units in use: {(unit_std > 1e-3).sum()} of {len(unit_std)} "
+          f"(std per unit: {np.round(unit_std, 3)})")
+
 print("\nWeek 3 training complete!")
