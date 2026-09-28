@@ -1,27 +1,14 @@
 import pandas as pd
+from preprocessing import (DATA_DIR, WARMUP_DAYS, STARTUP_MINUTES,
+                           RUNNING_THRESHOLD, load_plant_file, day_split, steady_state_mask)
 
-DATA_DIR = "data/LBNL_FDD_Data_Sets_Chiller_Plant"
 FAULT_FREE_FILE = f"{DATA_DIR}/ChillerPlant.csv"
-
-SELECTED_SENSORS = [
-    "CHL_SW_TEMP_1", "CHL_RW_TEMP_1", "CHL_SWCD_TEMP_1", "CHL_RWCD_TEMP_1",
-    "CWL_SEC_SW_TEMP", "CWL_SEC_RW_TEMP", "CT_SW_TEMP_1", "CT_RW_TEMP_1",
-    "OA_TEMP", "OA_TEMP_WB", "CHL_POW_1", "CT_POW_1",
-    "CHL_CW_FLOW_1", "CWL_SEC_DP", "CHL_STA_1",
-]
 
 # --- Step 1: confirm completeness of the fault-free file ---
 print("Loading fault-free file...")
-df = pd.read_csv(FAULT_FREE_FILE, usecols=SELECTED_SENSORS)
-# In the source file OA_TEMP and OA_TEMP_WB are swapped: the column named
-# OA_TEMP_WB is higher than OA_TEMP in 97% of rows (and never lower), but a
-# wet-bulb can never exceed the dry-bulb. Swap the names back.
-# (check_wet_bulb.py shows the evidence.) Fault files need the same fix.
-df = df.rename(columns={"OA_TEMP": "OA_TEMP_WB", "OA_TEMP_WB": "OA_TEMP"})
+# load_plant_file also swaps OA_TEMP / OA_TEMP_WB back (see preprocessing.py)
+df = load_plant_file(FAULT_FREE_FILE)
 assert (df["OA_TEMP_WB"] <= df["OA_TEMP"] + 0.5).all(), "wet-bulb above dry-bulb"
-
-# usecols keeps the file's column order - force our own, fixed order
-df = df[SELECTED_SENSORS]
 
 print(f"Shape: {df.shape}")
 print(f"Total missing values: {df.isnull().sum().sum()}")
@@ -95,51 +82,19 @@ catalog_df.to_csv("data/file_catalog.csv", index=False)
 print("\nCatalog saved to data/file_catalog.csv")
 
 # --- Step 3: split the fault-free data by whole days (70/15/15) ---
-# The file is one year of 1-minute data. A plain chronological 70/15/15 split
-# put Jan-Sep in train and only Nov-Dec (winter) in test, so each split saw a
-# different season. Instead, each whole day goes to one split at random:
-# every split covers the whole year, and rows inside a day stay together.
+# Whole days go to train/val/test at random, and only steady-state rows are
+# kept (see day_split and steady_state_mask in preprocessing.py).
 import numpy as np
 
 print("\n--- Splitting fault-free data (whole days, 70/15/15) ---")
 
-ROWS_PER_DAY = 1440          # 1-minute data
-RUNNING_THRESHOLD = 5.0      # kW - CHL_POW_1 above this = chiller is cooling
-WARMUP_DAYS = 1              # skip the first day (simulation start-up)
-STARTUP_MINUTES = 30         # skip the first minutes after each chiller start
+row_split = day_split(len(df))
+keep, running, startup, warmup = steady_state_mask(df)
 
-# Day number of each row, computed on the full (unfiltered) time order
-day = np.arange(len(df)) // ROWS_PER_DAY
-n_days = day.max() + 1
-
-rng = np.random.default_rng(42)   # fixed seed -> same split every run
-day_split = rng.choice(["train", "val", "test"], size=n_days, p=[0.70, 0.15, 0.15])
-row_split = day_split[day]
-
-# Keep only rows where the chiller is actually cooling.
-# CHL_POW_1 is ~0 kW (plant off, 5.5% of rows) or ~1.94 kW (standby, about
-# half the year) when the chiller is not cooling. Those rows are trivial for
-# the autoencoder and would dominate training. Faults are detected in running
-# mode only; at inference, rows below RUNNING_THRESHOLD are skipped.
-running = (df["CHL_POW_1"] > RUNNING_THRESHOLD).to_numpy()
 print(f"Rows with chiller running (> {RUNNING_THRESHOLD} kW): "
       f"{running.sum()} of {len(df)} ({running.mean()*100:.0f}%)")
-
-# Steady state only. check_val_errors.py showed that the worst-reconstructed
-# rows are (1) day 0, where OA_TEMP / OA_TEMP_WB caused 73% of the error:
-# the chiller runs on a cold January day right at the simulation start, a
-# state that does not occur anywhere else; and (2) the first ~30 minutes after
-# each chiller start (38% of the worst rows vs 10% of all rows), when the
-# sensors have not settled yet. Steady-state filtering is standard in chiller
-# FDD; at inference, the same rows are skipped.
-run_id = np.cumsum(~running)
-minutes_running = pd.Series(running.astype(int)).groupby(run_id).cumsum().to_numpy()
-startup = running & (minutes_running <= STARTUP_MINUTES)
-warmup = running & (day < WARMUP_DAYS)
 print(f"  skipped - first {WARMUP_DAYS} day(s) (simulation warm-up): {warmup.sum()} rows")
 print(f"  skipped - first {STARTUP_MINUTES} min after a chiller start: {(startup & ~warmup).sum()} rows")
-
-keep = running & ~startup & ~warmup
 
 train_df = df[keep & (row_split == "train")]
 val_df   = df[keep & (row_split == "val")]
