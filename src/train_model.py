@@ -73,3 +73,92 @@ loss_fn = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 print("\nTraining setup ready.")
+
+# --- Step 4: training loop with early stopping ---
+from codecarbon import EmissionsTracker
+import copy
+
+MAX_EPOCHS = 200
+PATIENCE   = 10      # stop if val loss does not improve for this many epochs
+MIN_DELTA  = 1e-5    # smaller improvements than this do not count
+
+torch.manual_seed(42)   # same results on every run
+
+
+def evaluate(model, data):
+    """Mean reconstruction loss on a whole dataset (no training)."""
+    model.eval()
+    with torch.no_grad():
+        return loss_fn(model(data), data).item()
+
+
+print("\n--- Training ---")
+tracker = EmissionsTracker(project_name="fdd_training", log_level="error")
+tracker.start()
+
+best_val_loss = float("inf")
+best_state = None
+best_epoch = 0
+epochs_without_improvement = 0
+history = []   # (train_loss, val_loss) per epoch
+
+for epoch in range(1, MAX_EPOCHS + 1):
+    # Train on all batches
+    model.train()
+    total_loss = 0.0
+    for x_batch, y_batch in train_loader:
+        optimizer.zero_grad()                     # clear old gradients
+        loss = loss_fn(model(x_batch), y_batch)   # how bad is the reconstruction
+        loss.backward()                           # compute gradients
+        optimizer.step()                          # update the weights
+        total_loss += loss.item() * len(x_batch)
+    train_loss = total_loss / len(train_tensor)
+
+    # Check on validation data (never used for training)
+    val_loss = evaluate(model, val_tensor)
+    history.append((train_loss, val_loss))
+
+    # Early stopping: keep the best model, stop when it stops improving
+    if val_loss < best_val_loss - MIN_DELTA:
+        best_val_loss = val_loss
+        best_state = copy.deepcopy(model.state_dict())
+        best_epoch = epoch
+        epochs_without_improvement = 0
+        mark = "  <- best"
+    else:
+        epochs_without_improvement += 1
+        mark = ""
+
+    print(f"Epoch {epoch:3d} | train loss {train_loss:.5f} | val loss {val_loss:.5f}{mark}")
+
+    if epochs_without_improvement >= PATIENCE:
+        print(f"\nEarly stopping: no improvement for {PATIENCE} epochs.")
+        break
+
+tracker.stop()
+emissions = tracker.final_emissions_data
+
+print(f"\nBest epoch: {best_epoch} (val loss {best_val_loss:.5f})")
+print(f"Training time:   {emissions.duration:.1f} seconds")
+print(f"Energy consumed: {emissions.energy_consumed:.6f} kWh")
+
+# --- Step 5: save the best model ---
+model.load_state_dict(best_state)
+torch.save(model.state_dict(), "models/autoencoder.pt")
+np.save("data/processed/loss_history.npy", np.array(history))
+print("\nBest model saved to models/autoencoder.pt")
+print("Loss history saved to data/processed/loss_history.npy")
+
+# --- Step 6: quick check of the reconstruction error ---
+# Per-row error = mean squared error over the 14 sensors of that row.
+# Next step: use the validation errors to choose the fault threshold.
+test_tensor = torch.tensor(test_normal, dtype=torch.float32)
+
+model.eval()
+with torch.no_grad():
+    for name, data in [("Validation", val_tensor), ("Test-normal", test_tensor)]:
+        errors = ((model(data) - data) ** 2).mean(dim=1).numpy()
+        print(f"{name:12s} error: mean={errors.mean():.5f}  "
+              f"median={np.median(errors):.5f}  99th pct={np.percentile(errors, 99):.5f}")
+
+print("\nWeek 3 training complete!")
