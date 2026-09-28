@@ -29,7 +29,7 @@ SELECTED_SENSORS = [
     "CHL_CW_FLOW_1", "CWL_SEC_DP", "CHL_STA_1",
 ]
 
-THRESHOLD_PERCENTILE = 99.9
+THRESHOLD_PERCENTILE = 98
 # floor prevents near-constant sensors (e.g. CWL_SEC_SW_TEMP) from getting a
 # zero threshold that fires on every tiny reconstruction noise
 THRESHOLD_FLOOR = 0.005
