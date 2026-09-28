@@ -1,4 +1,12 @@
 import numpy as np
+import torch
+import random
+
+# Fix random seeds for reproducibility — prevents the Dropout lottery on every run
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
 
 # --- Step 1: load the processed data from Week 2 ---
 print("Loading processed data...")
@@ -17,7 +25,6 @@ print(f"\nNumber of features (sensors): {n_features}")
 
 
 # --- Step 2: build the autoencoder architecture ---
-import torch
 import torch.nn as nn
 
 class Autoencoder(nn.Module):
