@@ -24,25 +24,31 @@ class Autoencoder(nn.Module):
     def __init__(self, n_features):
         super().__init__()
 
-        # Encoder: compress 15 -> 8 -> 4 (the bottleneck)
+        # Encoder: 19 -> 16 -> 8 -> 4 (bottleneck)
+        # Dropout(0.2) during training forces robust feature learning
         self.encoder = nn.Sequential(
-            nn.Linear(n_features, 8),
+            nn.Linear(n_features, 16),
             nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(16, 8),
+            nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(8, 4),
             nn.ReLU(),
         )
 
-        # Decoder: reconstruct 4 -> 8 -> 15
+        # Decoder: 4 -> 8 -> 16 -> 19
         self.decoder = nn.Sequential(
             nn.Linear(4, 8),
             nn.ReLU(),
-            nn.Linear(8, n_features),
-            # no activation on the last layer (linear output)
+            nn.Linear(8, 16),
+            nn.ReLU(),
+            nn.Linear(16, n_features),
         )
 
     def forward(self, x):
-        encoded = self.encoder(x)      # compress to the bottleneck
-        decoded = self.decoder(encoded)  # reconstruct back to 15
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
         return decoded
 
 
@@ -78,9 +84,9 @@ print("\nTraining setup ready.")
 # --- Step 4: training loop ---
 import os
 
-NUM_EPOCHS   = 100
+NUM_EPOCHS   = 150
 PRINT_EVERY  = 10   # print loss every N epochs
-PATIENCE     = 10   # early-stopping patience (epochs with no val improvement)
+PATIENCE     = 15   # early-stopping patience (epochs with no val improvement)
 
 print(f"\n--- Training for up to {NUM_EPOCHS} epochs ---")
 

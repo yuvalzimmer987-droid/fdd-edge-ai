@@ -10,12 +10,14 @@ class Autoencoder(nn.Module):
     def __init__(self, n_features):
         super().__init__()
         self.encoder = nn.Sequential(
-            nn.Linear(n_features, 8), nn.ReLU(),
-            nn.Linear(8, 4),          nn.ReLU(),
+            nn.Linear(n_features, 16), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(16, 8),          nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(8, 4),           nn.ReLU(),
         )
         self.decoder = nn.Sequential(
-            nn.Linear(4, 8),           nn.ReLU(),
-            nn.Linear(8, n_features),
+            nn.Linear(4, 8),            nn.ReLU(),
+            nn.Linear(8, 16),           nn.ReLU(),
+            nn.Linear(16, n_features),
         )
     def forward(self, x):
         return self.decoder(self.encoder(x))
