@@ -21,7 +21,8 @@ import torch
 import torch.nn as nn
 from model import Autoencoder   # defined in src/model.py
 
-# Create the model
+# Create the model (seed first, so the starting weights are the same every run)
+torch.manual_seed(42)
 model = Autoencoder(n_features)
 print("\n--- Autoencoder architecture ---")
 print(model)
@@ -57,7 +58,6 @@ MAX_EPOCHS = 200
 PATIENCE   = 10      # stop if val loss does not improve for this many epochs
 MIN_DELTA  = 1e-5    # smaller improvements than this do not count
 
-torch.manual_seed(42)   # same results on every run
 
 
 def evaluate(model, data):

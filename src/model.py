@@ -4,23 +4,27 @@ import torch.nn as nn
 # evaluation scripts use exactly the same model.
 
 class Autoencoder(nn.Module):
-    def __init__(self, n_features):
+    # Sizes chosen with experiment.py: (16, 6) detected as many faults as the
+    # best setting on the validation days (72.5% vs 73.2% of 1-hour windows)
+    # with half the parameters (692 vs 1364), and works with the per-sensor
+    # max-z score, which also names the faulty sensor.
+    def __init__(self, n_features, hidden=16, bottleneck=6):
         super().__init__()
 
-        # Encoder: compress n_features -> 8 -> 4 (the bottleneck)
-        # No ReLU on the bottleneck: with only 4 units, a ReLU unit that gets
-        # stuck at 0 ("dead") throws away a quarter of the model's capacity.
+        # Encoder: compress n_features -> hidden -> bottleneck
+        # No ReLU on the bottleneck: a ReLU unit that gets stuck at 0 ("dead")
+        # throws away part of the model's capacity.
         self.encoder = nn.Sequential(
-            nn.Linear(n_features, 8),
+            nn.Linear(n_features, hidden),
             nn.ReLU(),
-            nn.Linear(8, 4),
+            nn.Linear(hidden, bottleneck),
         )
 
-        # Decoder: reconstruct 4 -> 8 -> n_features
+        # Decoder: reconstruct bottleneck -> hidden -> n_features
         self.decoder = nn.Sequential(
-            nn.Linear(4, 8),
+            nn.Linear(bottleneck, hidden),
             nn.ReLU(),
-            nn.Linear(8, n_features),
+            nn.Linear(hidden, n_features),
             # no activation on the last layer (linear output)
         )
 
