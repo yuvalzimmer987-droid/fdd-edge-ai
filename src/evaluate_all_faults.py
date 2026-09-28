@@ -31,15 +31,14 @@ SELECTED_SENSORS = [
 
 def add_delta_features(df):
     df = df.copy()
-    df["CT_delta"]    = df["CT_RW_TEMP_1"]   - df["CT_SW_TEMP_1"]
-    df["CHL_delta"]   = df["CHL_RW_TEMP_1"]  - df["CHL_SW_TEMP_1"]
-    df["CD_delta"]    = df["CHL_RWCD_TEMP_1"]- df["CHL_SWCD_TEMP_1"]
-    df["CWL_delta"]   = df["CWL_SEC_RW_TEMP"]- df["CWL_SEC_SW_TEMP"]
-    df["CT_approach"] = df["CT_SW_TEMP_1"]   - df["OA_TEMP_WB"]
+    df["CT_delta"]  = df["CT_RW_TEMP_1"]   - df["CT_SW_TEMP_1"]
+    df["CHL_delta"] = df["CHL_RW_TEMP_1"]  - df["CHL_SW_TEMP_1"]
+    df["CD_delta"]  = df["CHL_RWCD_TEMP_1"]- df["CHL_SWCD_TEMP_1"]
+    df["CWL_delta"] = df["CWL_SEC_RW_TEMP"]- df["CWL_SEC_SW_TEMP"]
     return df
 
 
-n_features = len(SELECTED_SENSORS) + 5  # 15 original + 5 deltas incl. CT_approach
+n_features = len(SELECTED_SENSORS) + 4  # 15 original + 4 deltas
 model = Autoencoder(n_features)
 model.load_state_dict(torch.load("models/autoencoder_best.pt"))
 model.eval()
