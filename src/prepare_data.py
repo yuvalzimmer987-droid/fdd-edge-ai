@@ -13,6 +13,8 @@ SELECTED_SENSORS = [
 # --- Step 1: confirm completeness of the fault-free file ---
 print("Loading fault-free file...")
 df = pd.read_csv(FAULT_FREE_FILE, usecols=SELECTED_SENSORS)
+# usecols keeps the file's column order - force our own, fixed order
+df = df[SELECTED_SENSORS]
 
 print(f"Shape: {df.shape}")
 print(f"Total missing values: {df.isnull().sum().sum()}")
@@ -107,6 +109,17 @@ print(f"  Test-normal: {len(test_normal_df):>7} rows ({len(test_normal_df)/n*100
 assert len(train_df) + len(val_df) + len(test_normal_df) == n
 print("OK - splits add up correctly, no overlap.")
 
+# --- Step 3b: drop sensors that never change in the training data ---
+# A constant sensor (std = 0) carries no information, and StandardScaler
+# turns it into all zeros, which drags the overall std below 1.
+constant_cols = [c for c in train_df.columns if train_df[c].std() == 0]
+if constant_cols:
+    print(f"\nDropping constant sensors (no variation in train): {constant_cols}")
+    train_df = train_df.drop(columns=constant_cols)
+    val_df = val_df.drop(columns=constant_cols)
+    test_normal_df = test_normal_df.drop(columns=constant_cols)
+print(f"Sensors used for the model: {len(train_df.columns)}")
+
 # --- Step 4: normalize with StandardScaler (fit on train only) ---
 from sklearn.preprocessing import StandardScaler
 import joblib
@@ -124,8 +137,11 @@ val_scaled   = scaler.transform(val_df)
 test_normal_scaled = scaler.transform(test_normal_df)
 
 # Quick check: after scaling, train should have mean ~0 and std ~1
-print(f"Train mean after scaling (should be ~0): {train_scaled.mean():.4f}")
-print(f"Train std  after scaling (should be ~1): {train_scaled.std():.4f}")
+# Check per sensor (not one number over the whole array)
+means = train_scaled.mean(axis=0)
+stds  = train_scaled.std(axis=0)
+print(f"Train mean after scaling (should be ~0): min={means.min():.4f} max={means.max():.4f}")
+print(f"Train std  after scaling (should be ~1): min={stds.min():.4f} max={stds.max():.4f}")
 
 # Save the scaler for later use (on fault files, and at inference)
 joblib.dump(scaler, "models/scaler.joblib")
