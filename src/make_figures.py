@@ -45,9 +45,10 @@ fig, ax = plt.subplots(figsize=(7, 3.8))
 ax.plot(epochs, history[:, 0], color=BLUE, lw=2, label="Train")
 ax.plot(epochs, history[:, 1], color=ORANGE, lw=2, label="Validation")
 ax.set_yscale("log")
+# Label only 1, 2 and 5 of each decade, in plain numbers (no 10^x)
+ax.yaxis.set_major_locator(matplotlib.ticker.LogLocator(subs=(1.0, 2.0, 5.0)))
 ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter("%.3g"))
-ax.yaxis.set_minor_formatter(matplotlib.ticker.FormatStrFormatter("%.3g"))
-ax.tick_params(axis="y", which="minor", labelsize=8)
+ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
 ax.axvline(best, color=MUTED, lw=1, ls="--")
 ax.annotate(f"best epoch {best}\nval loss {history[best - 1, 1]:.4f}",
             xy=(best, history[best - 1, 1]), xytext=(-10, 30), textcoords="offset points",
