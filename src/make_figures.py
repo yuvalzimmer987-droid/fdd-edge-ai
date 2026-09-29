@@ -86,7 +86,7 @@ by_type = res.groupby("fault_type")["window_detection_pct"].agg(["mean", "min", 
 by_type = by_type.sort_values("mean")
 yt = np.arange(len(by_type))
 
-fig, ax = plt.subplots(figsize=(7, 3.8))
+fig, ax = plt.subplots(figsize=(8, 3.8))
 ax.barh(yt, by_type["mean"], height=0.6, color=BLUE)
 ax.errorbar(by_type["mean"], yt, xerr=[by_type["mean"] - by_type["min"], by_type["max"] - by_type["mean"]],
             fmt="none", ecolor=INK_2, elinewidth=1, capsize=3)
@@ -95,7 +95,7 @@ for yi, v, top in zip(yt, by_type["mean"], by_type["max"]):
 ax.set_yticks(yt)
 ax.set_yticklabels(by_type.index, fontsize=9)
 ax.set_xlim(0, 110)
-ax.set_xlabel("Mean hourly detection over severities (%); whiskers = min-max")
+ax.set_xlabel("Hourly detection (%): bar = mean over severities, whiskers = min-max")
 ax.set_title("Detection per fault type")
 ax.grid(axis="y", visible=False)
 save(fig, "3_detection_per_type")
@@ -140,13 +140,19 @@ windows = {60: ("1 hour", BLUE), 180: ("3 hours", ORANGE), 1440: ("1 day", AQUA)
 fig, axes = plt.subplots(1, 2, figsize=(10, 3.9), sharey=True)
 for ax, score, title in [(axes[0], "max_z", "Max-z score (per sensor)"),
                          (axes[1], "mahalanobis", "Mahalanobis score (all sensors)")]:
+    ends = []
     for w, (name, color) in windows.items():
         d = exp[(exp["score"] == score) & (exp["window_min"] == w)].set_index("model").loc[order]
         x = np.arange(len(order))
         ax.plot(x, d["detection_val_days_pct"], color=color, lw=2, marker="o", ms=5,
                 markeredgecolor=SURFACE, markeredgewidth=1.5, label=name)
-        ax.text(x[-1] + 0.12, d["detection_val_days_pct"].iloc[-1], name,
-                color=INK_2, fontsize=8, va="center")
+        ends.append([d["detection_val_days_pct"].iloc[-1], name])
+    # End labels: push apart labels that would overlap (min 2 points apart)
+    ends.sort()
+    for i in range(1, len(ends)):
+        ends[i][0] = max(ends[i][0], ends[i - 1][0] + 2.0)
+    for y_end, name in ends:
+        ax.text(len(order) - 1 + 0.12, y_end, name, color=INK_2, fontsize=8, va="center")
     ax.set_xticks(np.arange(len(order)))
     ax.set_xticklabels(order, fontsize=8)
     ax.set_xlim(-0.3, len(order) - 0.3)
