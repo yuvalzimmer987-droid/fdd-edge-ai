@@ -15,18 +15,11 @@ SELECTED_SENSORS = [
     # CWL_SEC_PM_SPD_2 and TWV_CTRL (which check_fault_signatures.py showed
     # react to the positive pressure bias and the cooling-tower PI fault)
     # lowered mean hourly detection on validation days from 72.5% to 64.3%.
+    # Also tried and rejected: heat-exchanger delta features (return - supply
+    # temperature of CT, evaporator, condenser, secondary loop) from branch
+    # claude/upbeat-ptolemy-atkfxt. Row-level detection rose (25.3% -> 31.7%)
+    # but hourly detection on validation days fell (72.5% -> 69.2%).
 ]
-
-# Derived inputs: return minus supply temperature of each heat exchanger.
-# Fouling lowers heat-exchanger performance, which shows more directly in
-# these differences than in the absolute temperatures (idea from the earlier
-# exploration on branch claude/upbeat-ptolemy-atkfxt).
-DELTA_FEATURES = {
-    "CT_delta":  ("CT_RW_TEMP_1", "CT_SW_TEMP_1"),        # cooling tower
-    "CHL_delta": ("CHL_RW_TEMP_1", "CHL_SW_TEMP_1"),      # chiller evaporator
-    "CD_delta":  ("CHL_RWCD_TEMP_1", "CHL_SWCD_TEMP_1"),  # chiller condenser
-    "CWL_delta": ("CWL_SEC_RW_TEMP", "CWL_SEC_SW_TEMP"),  # secondary loop
-}
 
 ROWS_PER_DAY = 1440          # 1-minute data
 RUNNING_THRESHOLD = 5.0      # kW - CHL_POW_1 above this = chiller is cooling
@@ -35,7 +28,7 @@ STARTUP_MINUTES = 30         # skip the first minutes after each chiller start
 
 
 def load_plant_file(path):
-    """Load one plant CSV: selected sensors in a fixed order, plus delta features."""
+    """Load one plant CSV with the selected sensors, in a fixed column order."""
     df = pd.read_csv(path, usecols=SELECTED_SENSORS)
     # In the source files OA_TEMP and OA_TEMP_WB are swapped: the column named
     # OA_TEMP_WB is higher than OA_TEMP in 97% of rows (and never lower), but a
@@ -43,10 +36,7 @@ def load_plant_file(path):
     # (check_wet_bulb.py shows the evidence.)
     df = df.rename(columns={"OA_TEMP": "OA_TEMP_WB", "OA_TEMP_WB": "OA_TEMP"})
     # usecols keeps the file's column order - force our own, fixed order
-    df = df[SELECTED_SENSORS].copy()
-    for name, (ret, sup) in DELTA_FEATURES.items():
-        df[name] = df[ret] - df[sup]
-    return df
+    return df[SELECTED_SENSORS]
 
 
 def day_split(n_rows):
