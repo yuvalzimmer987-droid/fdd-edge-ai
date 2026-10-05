@@ -1,4 +1,5 @@
 import os
+import sys
 import numpy as np
 import pandas as pd
 import joblib
@@ -21,6 +22,10 @@ from preprocessing import DATA_DIR, load_plant_file, day_split, steady_state_mas
 #   - the 19 "detectable" files: without the 4 that check_fault_signatures.py
 #     showed do not change any measured column beyond noise (fouling 095) or
 #     only show in noisy pump signals (positive pressure bias)
+#
+# Run: python src/tradeoff_sweep.py              (full sweep + figure)
+#      python src/tradeoff_sweep.py --plot-only  (redraw the figure from
+#                                                 data/tradeoff_results.csv)
 
 PERCENTILES = [95, 97, 98, 99, 99.5]
 WINDOWS = [60, 120, 180, 360, 1440]           # minutes
@@ -32,82 +37,85 @@ NOT_DETECTABLE = [
     "ChillerPlant_secondary_chilled_water_pressure_bias_020.csv",
 ]
 
-# --- Step 1: model, scaler, data (residuals computed once) ---
-scaler = joblib.load("models/scaler.joblib")
-sensors = list(scaler.feature_names_in_)
-model = Autoencoder(len(sensors))
-model.load_state_dict(torch.load("models/autoencoder.pt"))
-model.eval()
+if "--plot-only" in sys.argv:
+    res = pd.read_csv("data/tradeoff_results.csv")
+else:
+    # --- Step 1: model, scaler, data (residuals computed once) ---
+    scaler = joblib.load("models/scaler.joblib")
+    sensors = list(scaler.feature_names_in_)
+    model = Autoencoder(len(sensors))
+    model.load_state_dict(torch.load("models/autoencoder.pt"))
+    model.eval()
 
 
-def residuals(x):
-    with torch.no_grad():
-        t = torch.tensor(x, dtype=torch.float32)
-        return (model(t) - t).numpy()
+    def residuals(x):
+        with torch.no_grad():
+            t = torch.tensor(x, dtype=torch.float32)
+            return (model(t) - t).numpy()
 
 
-normal = {
-    "val":  (np.load("data/processed/val_idx.npy"), residuals(np.load("data/processed/val.npy"))),
-    "test": (np.load("data/processed/test_normal_idx.npy"),
-             residuals(np.load("data/processed/test_normal.npy"))),
-}
+    normal = {
+        "val":  (np.load("data/processed/val_idx.npy"), residuals(np.load("data/processed/val.npy"))),
+        "test": (np.load("data/processed/test_normal_idx.npy"),
+                 residuals(np.load("data/processed/test_normal.npy"))),
+    }
 
-print("Loading fault files...")
-catalog = pd.read_csv("data/file_catalog.csv", dtype={"severity": str})
-faults = []
-for _, row in catalog[catalog["label"] == "fault"].iterrows():
-    df = load_plant_file(f"{DATA_DIR}/{row['filename']}")
-    keep, _, _, _ = steady_state_mask(df)
-    split = day_split(len(df))
-    parts = {}
-    for part in ["val", "test"]:
-        mask = keep & (split == part)
-        parts[part] = (np.flatnonzero(mask), residuals(scaler.transform(df.loc[mask, sensors])))
-    faults.append({"file": row["filename"], **parts})
-detectable = np.array([f["file"] not in NOT_DETECTABLE for f in faults])
-print(f"{len(faults)} fault files, {detectable.sum()} counted as detectable.\n")
-
-
-def window_means(idx, resid, minutes):
-    df = pd.DataFrame(resid)
-    window = idx // minutes
-    counts = df.groupby(window).size()
-    return df.groupby(window).mean()[counts >= MIN_ROWS_PER_WINDOW].to_numpy()
+    print("Loading fault files...")
+    catalog = pd.read_csv("data/file_catalog.csv", dtype={"severity": str})
+    faults = []
+    for _, row in catalog[catalog["label"] == "fault"].iterrows():
+        df = load_plant_file(f"{DATA_DIR}/{row['filename']}")
+        keep, _, _, _ = steady_state_mask(df)
+        split = day_split(len(df))
+        parts = {}
+        for part in ["val", "test"]:
+            mask = keep & (split == part)
+            parts[part] = (np.flatnonzero(mask), residuals(scaler.transform(df.loc[mask, sensors])))
+        faults.append({"file": row["filename"], **parts})
+    detectable = np.array([f["file"] not in NOT_DETECTABLE for f in faults])
+    print(f"{len(faults)} fault files, {detectable.sum()} counted as detectable.\n")
 
 
-# --- Step 2: sweep ---
-rows = []
-for minutes in WINDOWS:
-    val_win = window_means(*normal["val"], minutes)
-    test_win = window_means(*normal["test"], minutes)
-    center, spread = val_win.mean(axis=0), val_win.std(axis=0)
-    score = lambda w: np.abs((w - center) / spread).max(axis=1)
-    fault_scores = {p: [score(window_means(*f[p], minutes)) for f in faults] for p in ["val", "test"]}
+    def window_means(idx, resid, minutes):
+        df = pd.DataFrame(resid)
+        window = idx // minutes
+        counts = df.groupby(window).size()
+        return df.groupby(window).mean()[counts >= MIN_ROWS_PER_WINDOW].to_numpy()
 
-    for pct in PERCENTILES:
-        threshold = np.percentile(score(val_win), pct)
-        det = {p: np.array([(s > threshold).mean() * 100 for s in fault_scores[p]]) for p in ["val", "test"]}
-        rows.append({
-            "window_min": minutes,
-            "percentile": pct,
-            "normal_test_windows": len(test_win),
-            "false_alarm_pct": round((score(test_win) > threshold).mean() * 100, 2),
-            "detection_all_test_pct": round(det["test"].mean(), 1),
-            "detection_detectable_test_pct": round(det["test"][detectable].mean(), 1),
-            "detection_all_val_pct": round(det["val"].mean(), 1),
-        })
 
-res = pd.DataFrame(rows)
-os.makedirs("reports/figures", exist_ok=True)
-res.to_csv("data/tradeoff_results.csv", index=False)
+    # --- Step 2: sweep ---
+    rows = []
+    for minutes in WINDOWS:
+        val_win = window_means(*normal["val"], minutes)
+        test_win = window_means(*normal["test"], minutes)
+        center, spread = val_win.mean(axis=0), val_win.std(axis=0)
+        score = lambda w: np.abs((w - center) / spread).max(axis=1)
+        fault_scores = {p: [score(window_means(*f[p], minutes)) for f in faults] for p in ["val", "test"]}
 
-print("Detection on TEST days. 'all' = 23 files, 'detectable' = 19 files.")
-print("False alarms = % of normal test windows flagged.\n")
-print(res.rename(columns={
-    "window_min": "window", "percentile": "pct", "normal_test_windows": "n windows",
-    "false_alarm_pct": "false al. %", "detection_all_test_pct": "det. all %",
-    "detection_detectable_test_pct": "det. detectable %", "detection_all_val_pct": "det. all (val) %",
-}).to_string(index=False))
+        for pct in PERCENTILES:
+            threshold = np.percentile(score(val_win), pct)
+            det = {p: np.array([(s > threshold).mean() * 100 for s in fault_scores[p]]) for p in ["val", "test"]}
+            rows.append({
+                "window_min": minutes,
+                "percentile": pct,
+                "normal_test_windows": len(test_win),
+                "false_alarm_pct": round((score(test_win) > threshold).mean() * 100, 2),
+                "detection_all_test_pct": round(det["test"].mean(), 1),
+                "detection_detectable_test_pct": round(det["test"][detectable].mean(), 1),
+                "detection_all_val_pct": round(det["val"].mean(), 1),
+            })
+
+    res = pd.DataFrame(rows)
+    os.makedirs("reports/figures", exist_ok=True)
+    res.to_csv("data/tradeoff_results.csv", index=False)
+
+    print("Detection on TEST days. 'all' = 23 files, 'detectable' = 19 files.")
+    print("False alarms = % of normal test windows flagged.\n")
+    print(res.rename(columns={
+        "window_min": "window", "percentile": "pct", "normal_test_windows": "n windows",
+        "false_alarm_pct": "false al. %", "detection_all_test_pct": "det. all %",
+        "detection_detectable_test_pct": "det. detectable %", "detection_all_val_pct": "det. all (val) %",
+    }).to_string(index=False))
 
 # --- Step 3: figure - detection vs false alarms, one line per window ---
 BLUE, ORANGE, AQUA, YELLOW, MAGENTA = "#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"
@@ -127,9 +135,18 @@ fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), sharey=True)
 for ax, col, title in [(axes[0], "detection_all_test_pct", "All 23 fault files"),
                        (axes[1], "detection_detectable_test_pct", "19 detectable fault files")]:
     for minutes in WINDOWS:
-        d = res[res["window_min"] == minutes].sort_values("false_alarm_pct")
+        # Connect points in threshold order (strict -> loose)
+        d = res[res["window_min"] == minutes].sort_values("percentile", ascending=False)
         ax.plot(d["false_alarm_pct"], d[col], color=colors[minutes], lw=2, marker="o", ms=5,
                 markeredgecolor=SURFACE, markeredgewidth=1.5, label=names[minutes])
+    # Mark the setting used in the final model: 1-hour window, 99th percentile
+    cur = res[(res["window_min"] == 60) & (res["percentile"] == 99)].iloc[0]
+    ax.plot(cur["false_alarm_pct"], cur[col], marker="o", ms=13, mfc="none",
+            mec="#0b0b0b", mew=1.5, zorder=5)
+    ax.annotate(f"current setting\n(1 h, 99th pct): {cur[col]:.1f}%",
+                xy=(cur["false_alarm_pct"], cur[col]), xytext=(70, -85),
+                textcoords="offset points", fontsize=8, color="#0b0b0b",
+                arrowprops=dict(arrowstyle="-", color=INK_2, lw=0.8))
     ax.axhline(85, color=INK_2, lw=1, ls="--")
     ax.text(ax.get_xlim()[1], 85.5, "85% target", ha="right", va="bottom", fontsize=8, color=INK_2)
     ax.set_title(title)
