@@ -27,6 +27,7 @@ from preprocessing import DATA_DIR, load_plant_file, day_split, steady_state_mas
 #      python src/subsystems.py --hybrid     (the existing single model for
 #                                             chiller + tower, plus a separate
 #                                             pump detector)
+#      add --sweep to also try false-alarm budgets of 1.1, 2, 3 and 5%
 
 USE_DELTA_T = "--no-delta" not in sys.argv
 HYBRID = "--hybrid" in sys.argv
@@ -207,12 +208,17 @@ def subsystem_scores(df_rows, idx):
 
 # --- Step 3: thresholds - one per subsystem, set together so that all three
 # combined raise an alarm in about 1% of normal validation hours ---
+def find_thresholds(val_scores, budget):
+    """Lowest common percentile whose thresholds flag <= budget % of normal val hours."""
+    for pct in np.append(np.arange(95.0, 100.0, 0.01), 100.0):   # 100 = highest normal hour
+        thresholds = val_scores.quantile(min(pct / 100, 1.0))
+        any_rate = (val_scores > thresholds).any(axis=1).mean() * 100
+        if any_rate <= budget:
+            return thresholds, pct, any_rate
+
+
 val_scores = subsystem_scores(normal.iloc[rows["val"]], rows["val"])
-for pct in np.append(np.arange(99.0, 100.0, 0.01), 100.0):   # 100 = highest normal hour
-    thresholds = val_scores.quantile(min(pct / 100, 1.0))
-    any_rate = (val_scores > thresholds).any(axis=1).mean() * 100
-    if any_rate <= TARGET_FALSE_ALARM:
-        break
+thresholds, pct, any_rate = find_thresholds(val_scores, TARGET_FALSE_ALARM)
 print(f"\nThresholds at the {pct:.2f}th percentile of each subsystem "
       f"-> {any_rate:.2f}% of normal validation hours flagged")
 
@@ -232,15 +238,18 @@ catalog = pd.read_csv("data/file_catalog.csv", dtype={"severity": str})
 names = list(models)
 print(f"\n{'fault':45s} {'any':>6s} " + " ".join(f"{n[:8]:>8s}" for n in names) + "   main subsystem")
 results = []
+fault_scores = []      # kept for the --sweep below
 for _, row in catalog[catalog["label"] == "fault"].iterrows():
     df = load_plant_file(f"{DATA_DIR}/{row['filename']}", ALL_COLUMNS)
     f_keep, _, _, _ = steady_state_mask(df)
     f_split = day_split(len(df))
-    det = {}
+    det, scores = {}, {"file": row["filename"]}
     for part in ["val", "test"]:
         idx = np.flatnonzero(f_keep & (f_split == part))
-        flags = subsystem_scores(df.iloc[idx], idx) > thresholds
+        scores[part] = subsystem_scores(df.iloc[idx], idx)
+        flags = scores[part] > thresholds
         det[part] = (flags.any(axis=1).mean() * 100, (flags.mean() * 100).to_dict())
+    fault_scores.append(scores)
     any_test, each_test = det["test"]
     main = max(each_test, key=each_test.get) if any_test > 2 else "-"
     severity = row["severity"] if isinstance(row["severity"], str) else "-"
@@ -263,3 +272,28 @@ print(f"Mean detection, all 23 (test):        {res['detection_test_pct'].mean():
 print(f"Mean detection, 19 detectable (test): {res.loc[detectable, 'detection_test_pct'].mean():.1f}%")
 print(f"Mean detection, all 23 (VALIDATION):  {res['detection_val_pct'].mean():.1f}%   <- use this to decide")
 print("\nSaved models/subsys_*.pt, models/subsys_thresholds.json, data/subsystem_results.csv")
+
+# --- Step 5 (--sweep): same detectors, different false-alarm budgets ---
+# How much detection do we gain if we allow more false alarms?
+if "--sweep" in sys.argv:
+    INVISIBLE = ["ChillerPlant_chiller_fouling_095.csv", "ChillerPlant_coolingtower_fouling_095.csv"]
+    visible = np.array([f["file"] not in INVISIBLE for f in fault_scores])
+    rows_out = []
+    for budget in [1.1, 2.0, 3.0, 5.0]:
+        thr, p, val_fa = find_thresholds(val_scores, budget)
+        det = {part: np.array([(f[part] > thr).any(axis=1).mean() * 100 for f in fault_scores])
+               for part in ["val", "test"]}
+        rows_out.append({
+            "val_budget_pct": budget,
+            "percentile": round(p, 2),
+            "false_alarm_val_pct": round(val_fa, 2),
+            "false_alarm_test_pct": round((test_scores > thr).any(axis=1).mean() * 100, 2),
+            "detection_all_val_pct": round(det["val"].mean(), 1),
+            "detection_all_test_pct": round(det["test"].mean(), 1),
+            "detection_21_test_pct": round(det["test"][visible].mean(), 1),
+        })
+    sweep = pd.DataFrame(rows_out)
+    sweep.to_csv("data/hybrid_tradeoff.csv", index=False)
+    print("\n=== False-alarm budget sweep ('21' = without the two fouling 095 files) ===")
+    print(sweep.to_string(index=False))
+    print("Saved data/hybrid_tradeoff.csv")
