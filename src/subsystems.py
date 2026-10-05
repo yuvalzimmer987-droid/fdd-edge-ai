@@ -24,8 +24,12 @@ from preprocessing import DATA_DIR, load_plant_file, day_split, steady_state_mas
 #
 # Run: python src/subsystems.py              (chiller model includes delta T)
 #      python src/subsystems.py --no-delta   (same, without delta T)
+#      python src/subsystems.py --hybrid     (the existing single model for
+#                                             chiller + tower, plus a separate
+#                                             pump detector)
 
 USE_DELTA_T = "--no-delta" not in sys.argv
+HYBRID = "--hybrid" in sys.argv
 
 SUBSYSTEMS = {
     "chiller": [
@@ -43,9 +47,26 @@ SUBSYSTEMS = {
         "CWL_SEC_SW_TEMP", "CWL_SEC_RW_TEMP", "CWL_SEC_LOAD",
     ],
 }
-ALL_COLUMNS = sorted({c for cols in SUBSYSTEMS.values() for c in cols})
+# Hybrid: the per-subsystem run showed that chiller and cooling-tower faults
+# are detected better by the single model (the two systems interact through
+# the condenser loop, which a joint model sees), while the pumping loop
+# benefits from its own detector. So keep the single model as "main" and add
+# only the pump detector.
+MAIN_SCALER = joblib.load("models/scaler.joblib") if HYBRID else None
+MAIN_COLUMNS = list(MAIN_SCALER.feature_names_in_) if HYBRID else []
+if HYBRID:
+    SUBSYSTEMS = {"pumps": SUBSYSTEMS["pumps"]}
 
-TARGET_FALSE_ALARM = 1.0     # % of normal validation hours, all subsystems together
+# CHL_POW_1 is always loaded: the steady-state mask needs it
+ALL_COLUMNS = sorted({c for cols in SUBSYSTEMS.values() for c in cols}
+                     | set(MAIN_COLUMNS) | {"CHL_POW_1"})
+
+# False-alarm budget on normal validation hours, all detectors together. The
+# single model's threshold (99th percentile of 289 validation hours) flags
+# 3 of them, 1.04%; a 1.0% budget allows only 2 hours, which pushed all
+# thresholds to the maximum normal hour in the first run and made the
+# comparison unfair. 1.1% gives the detectors together the same 3 hours.
+TARGET_FALSE_ALARM = 1.1
 WINDOW_MINUTES = 60
 MIN_ROWS_PER_WINDOW = 30
 MAX_EPOCHS = 200
@@ -60,6 +81,8 @@ NOT_DETECTABLE = [           # same 4 files as in tradeoff_sweep.py
 
 def subsystem_frame(df, name):
     """The columns of one subsystem (plus chiller delta T if enabled)."""
+    if name == "main":
+        return df[MAIN_COLUMNS].copy()
     x = df[SUBSYSTEMS[name]].copy()
     if name == "chiller" and USE_DELTA_T:
         # Chilled-water delta T: return minus supply temperature of the chiller
@@ -151,6 +174,25 @@ for name in SUBSYSTEMS:
     torch.save(model.state_dict(), f"models/subsys_{name}.pt")
     joblib.dump(scaler, f"models/subsys_{name}_scaler.joblib")
 
+if HYBRID:
+    # The existing single model, trained by train_model.py
+    from model import Autoencoder as MainAutoencoder
+    main_model = MainAutoencoder(len(MAIN_COLUMNS))
+    main_model.load_state_dict(torch.load("models/autoencoder.pt"))
+    main_model.eval()
+
+    def main_resid_of(arr):
+        with torch.no_grad():
+            t = torch.tensor(arr, dtype=torch.float32)
+            return (main_model(t) - t).numpy()
+
+    x_val = MAIN_SCALER.transform(normal[MAIN_COLUMNS].iloc[rows["val"]]).astype(np.float32)
+    val_win = window_means(rows["val"], main_resid_of(x_val))
+    models = {"main": dict(columns=MAIN_COLUMNS, scaler=MAIN_SCALER, model=main_model,
+                           resid_of=main_resid_of, center=val_win.mean().to_numpy(),
+                           spread=val_win.std().to_numpy()), **models}
+    print(f"  {'main':13s} {len(MAIN_COLUMNS):2d} inputs  (existing single model)")
+
 
 def subsystem_scores(df_rows, idx):
     """Hourly max-z score per subsystem, one column each, aligned on window id."""
@@ -187,7 +229,8 @@ with open("models/subsys_thresholds.json", "w") as f:
 
 # --- Step 4: every fault file, scored on validation and test days ---
 catalog = pd.read_csv("data/file_catalog.csv", dtype={"severity": str})
-print(f"\n{'fault':45s} {'any':>6s} {'chiller':>8s} {'tower':>7s} {'pumps':>7s}   main subsystem")
+names = list(models)
+print(f"\n{'fault':45s} {'any':>6s} " + " ".join(f"{n[:8]:>8s}" for n in names) + "   main subsystem")
 results = []
 for _, row in catalog[catalog["label"] == "fault"].iterrows():
     df = load_plant_file(f"{DATA_DIR}/{row['filename']}", ALL_COLUMNS)
@@ -202,8 +245,8 @@ for _, row in catalog[catalog["label"] == "fault"].iterrows():
     main = max(each_test, key=each_test.get) if any_test > 2 else "-"
     severity = row["severity"] if isinstance(row["severity"], str) else "-"
     name = f"{row['fault_type']} {severity}"
-    print(f"{name:45s} {any_test:5.1f}% {each_test['chiller']:7.1f}% "
-          f"{each_test['cooling_tower']:6.1f}% {each_test['pumps']:6.1f}%   {main}")
+    print(f"{name:45s} {any_test:5.1f}% " + " ".join(f"{each_test[n]:7.1f}%" for n in names)
+          + f"   {main}")
     results.append({"filename": row["filename"], "fault": name,
                     "detection_test_pct": round(any_test, 2),
                     "detection_val_pct": round(det["val"][0], 2),
