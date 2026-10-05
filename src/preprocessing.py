@@ -27,16 +27,16 @@ WARMUP_DAYS = 1              # skip the first day (simulation start-up)
 STARTUP_MINUTES = 30         # skip the first minutes after each chiller start
 
 
-def load_plant_file(path):
-    """Load one plant CSV with the selected sensors, in a fixed column order."""
-    df = pd.read_csv(path, usecols=SELECTED_SENSORS)
+def load_plant_file(path, columns=SELECTED_SENSORS):
+    """Load one plant CSV with the given columns, in a fixed column order."""
+    df = pd.read_csv(path, usecols=columns)
     # In the source files OA_TEMP and OA_TEMP_WB are swapped: the column named
     # OA_TEMP_WB is higher than OA_TEMP in 97% of rows (and never lower), but a
     # wet-bulb can never exceed the dry-bulb. Swap the names back.
     # (check_wet_bulb.py shows the evidence.)
     df = df.rename(columns={"OA_TEMP": "OA_TEMP_WB", "OA_TEMP_WB": "OA_TEMP"})
     # usecols keeps the file's column order - force our own, fixed order
-    return df[SELECTED_SENSORS]
+    return df[list(columns)]
 
 
 def day_split(n_rows):
