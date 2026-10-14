@@ -23,7 +23,9 @@ from preprocessing import DATA_DIR, load_plant_file, day_split, steady_state_mas
 # decision on the VALIDATION days of the fault files, TEST days only reported.
 #
 # Run: python src/capacity_sweep.py           (full run, ~20-40 min)
-#      python src/capacity_sweep.py --quick   (3 epochs per model, just to test the code)
+#      python src/capacity_sweep.py --seeds   (the current model and the two best
+#                                              candidates, 5 random seeds each, ~30 min)
+#      add --quick to train 3 epochs per model, just to test the code
 
 # (hidden layer widths per side, bottleneck). ((16,), 6) is the current model.
 CONFIGS = [
@@ -31,6 +33,13 @@ CONFIGS = [
     ((64,), 8), ((128,), 8),
     ((64, 32), 6), ((128, 64), 8),
 ]
+# --seeds: is a gain real, or the luck of one random start? The first run
+# used seed 42 only, and the results were not monotonic in model size.
+SEED_CONFIGS = [((16,), 6), ((64,), 8), ((128,), 8)]
+SEEDS = [42, 1, 2, 3, 4]
+SEED_MODE = "--seeds" in sys.argv
+RUNS = ([(h, b, s) for h, b in SEED_CONFIGS for s in SEEDS] if SEED_MODE
+        else [(h, b, 42) for h, b in CONFIGS])
 BUDGETS = [1.1, 2.0]           # false-alarm budgets, % of normal validation hours
 PERCENTILE = 99                # main model alone, as in evaluate_faults.py
 WINDOW_MINUTES = 60
@@ -67,9 +76,9 @@ class Autoencoder(nn.Module):
         return self.decoder(self.encoder(x))
 
 
-def train_autoencoder(train, val, hidden, bottleneck):
+def train_autoencoder(train, val, hidden, bottleneck, seed=42):
     """Same training as train_model.py: Adam, early stopping on val loss."""
-    torch.manual_seed(42)
+    torch.manual_seed(seed)
     model = Autoencoder(train.shape[1], hidden, bottleneck)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     loss_fn = nn.MSELoss()
@@ -173,6 +182,7 @@ visible = np.array([f["file"] not in INVISIBLE for f in faults])
 print(f"Loaded {len(faults)} fault files.")
 
 # --- Step 2: the pump detector, trained once (same as subsystems.py --hybrid) ---
+# Always seed 42, also in --seeds mode, so only the main model changes.
 n_pump = len(pump_columns)
 pump_model, _, _ = train_autoencoder(normal_x["train"][1], normal_x["val"][1],
                                      (16,), max(2, n_pump // 2))
@@ -181,12 +191,12 @@ pump_scores = {p: pump(rows[p], normal_x[p][1]) for p in ["val", "test"]}
 pump_fault_scores = [{p: pump(f[p][0], f[p][2]) for p in ["val", "test"]} for f in faults]
 print(f"Pump detector: {n_pump} inputs.")
 
-# --- Step 3: every main model size ---
+# --- Step 3: every main model size (and seed) ---
 results = []
-for hidden, bottleneck in CONFIGS:
+for hidden, bottleneck, seed in RUNS:
     start = time.time()
     model, val_loss, epochs = train_autoencoder(normal_x["train"][0], normal_x["val"][0],
-                                                hidden, bottleneck)
+                                                hidden, bottleneck, seed)
     n_params = sum(p.numel() for p in model.parameters())
     main = HourlyScorer(model, rows["val"], normal_x["val"][0])
 
@@ -203,7 +213,8 @@ for hidden, bottleneck in CONFIGS:
     alone = {p: np.mean([(s[p]["main"].dropna() > thr).mean() * 100 for s in fault_scores])
              for p in ["val", "test"]}
 
-    row = {"hidden": "-".join(map(str, hidden)), "bottleneck": bottleneck, "params": n_params,
+    row = {"hidden": "-".join(map(str, hidden)), "bottleneck": bottleneck, "seed": seed,
+           "params": n_params,
            "epochs": epochs, "val_loss": round(val_loss, 5),
            "train_s": round(time.time() - start),
            "main_alone_val_pct": round(alone["val"], 1), "main_alone_test_pct": round(alone["test"], 1)}
@@ -217,7 +228,7 @@ for hidden, bottleneck in CONFIGS:
         row[f"hybrid{tag}_test21_pct"] = round(det["test"][visible].mean(), 1)
         row[f"hybrid{tag}_fa_test_pct"] = round((test_scores > thresholds).any(axis=1).mean() * 100, 2)
     results.append(row)
-    print(f"\nhidden {row['hidden']:>6s}  bottleneck {bottleneck}  {n_params:6d} params  "
+    print(f"\nhidden {row['hidden']:>6s}  bottleneck {bottleneck}  seed {seed:2d}  {n_params:6d} params  "
           f"val loss {val_loss:.5f}  ({epochs} epochs, {row['train_s']} s)")
     print(f"   main alone          val {alone['val']:5.1f}%   test {alone['test']:5.1f}%")
     for budget in BUDGETS:
@@ -227,6 +238,21 @@ for hidden, bottleneck in CONFIGS:
               f"false alarms (test) {row[f'hybrid{tag}_fa_test_pct']:.2f}%")
 
 res = pd.DataFrame(results)
+
+if SEED_MODE:
+    res.to_csv("data/capacity_seeds.csv", index=False)
+    print(f"\n\n=== Mean ± std over {len(SEEDS)} seeds (current model = first row) ===")
+    metrics = ["main_alone_val_pct", "hybrid1.1_val_pct", "hybrid1.1_test_pct", "hybrid1.1_fa_test_pct",
+               "hybrid2_val_pct", "hybrid2_test_pct", "hybrid2_fa_test_pct"]
+    groups = res.groupby(["hidden", "bottleneck", "params"], sort=False)[metrics]
+    mean, std = groups.mean(), groups.std()
+    summary = mean.round(1).astype(str) + " ± " + std.round(1).astype(str)
+    summary.columns = [c.replace("_pct", "") for c in summary.columns]
+    print(summary.to_string())
+    print("\nA gain is convincing only if it is clearly larger than the ± spread.")
+    print("Saved data/capacity_seeds.csv")
+    sys.exit()
+
 res.to_csv("data/capacity_results.csv", index=False)
 
 print("\n\n=== Summary (decide on the 'val' columns; current model = first row) ===")
