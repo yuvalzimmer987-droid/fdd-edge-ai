@@ -55,7 +55,7 @@ ax.annotate(f"best epoch {best}\nval loss {history[best - 1, 1]:.4f}",
             ha="right", color=INK_2, fontsize=9)
 ax.set_xlabel("Epoch")
 ax.set_ylabel("Reconstruction loss (MSE, log scale)")
-ax.set_title("Training curve - autoencoder (16, 6)")
+ax.set_title("Training curve - autoencoder (128, 8)")
 ax.legend(loc="upper right")
 save(fig, "1_training_curve")
 

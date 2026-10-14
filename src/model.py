@@ -4,11 +4,14 @@ import torch.nn as nn
 # evaluation scripts use exactly the same model.
 
 class Autoencoder(nn.Module):
-    # Sizes chosen with experiment.py: (16, 6) detected as many faults as the
-    # best setting on the validation days (72.5% vs 73.2% of 1-hour windows)
-    # with half the parameters (692 vs 1364), and works with the per-sensor
-    # max-z score, which also names the faulty sensor.
-    def __init__(self, n_features, hidden=16, bottleneck=6):
+    # Sizes chosen with capacity_sweep.py --seeds (5 random seeds per model,
+    # main model + pump detector, decided on validation days):
+    #   (16, 6),    692 params: 82.5 +- 2.2% (2% budget, val) - depends on the seed;
+    #                           seed 42 happened to be its best run (85.5%)
+    #   (128, 8), 5,910 params: 85.6 +- 0.2% - the same result for every seed
+    # More capacity does not raise the ceiling (~85%, limited by the data), but
+    # reaches it reliably. 5,910 parameters (~23 KB) is still tiny for an edge device.
+    def __init__(self, n_features, hidden=128, bottleneck=8):
         super().__init__()
 
         # Encoder: compress n_features -> hidden -> bottleneck
