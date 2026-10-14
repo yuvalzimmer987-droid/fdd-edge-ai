@@ -28,6 +28,7 @@ from preprocessing import DATA_DIR, load_plant_file, day_split, steady_state_mas
 #                                             chiller + tower, plus a separate
 #                                             pump detector)
 #      add --sweep to also try false-alarm budgets of 1.1, 2, 3 and 5%
+#      add --budget 2 to save the thresholds for a 2% budget (default 1.1%)
 
 USE_DELTA_T = "--no-delta" not in sys.argv
 HYBRID = "--hybrid" in sys.argv
@@ -68,6 +69,8 @@ ALL_COLUMNS = sorted({c for cols in SUBSYSTEMS.values() for c in cols}
 # thresholds to the maximum normal hour in the first run and made the
 # comparison unfair. 1.1% gives the detectors together the same 3 hours.
 TARGET_FALSE_ALARM = 1.1
+if "--budget" in sys.argv:
+    TARGET_FALSE_ALARM = float(sys.argv[sys.argv.index("--budget") + 1])
 WINDOW_MINUTES = 60
 MIN_ROWS_PER_WINDOW = 30
 MAX_EPOCHS = 200
@@ -231,6 +234,7 @@ with open("models/subsys_thresholds.json", "w") as f:
     json.dump({name: {"columns": m["columns"], "threshold": float(thresholds[name]),
                       "center": m["center"].tolist(), "spread": m["spread"].tolist()}
                for name, m in models.items()} | {"percentile": float(pct),
+                                                 "budget": TARGET_FALSE_ALARM,
                                                  "delta_t": USE_DELTA_T}, f, indent=2)
 
 # --- Step 4: every fault file, scored on validation and test days ---
