@@ -29,7 +29,10 @@ SEVERITIES = ["Minor", "Major", "Critical"]
 LOG_TICKS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100]
 DETECTORS = {"main": ("Main model", BLUE), "pumps": ("Pump detector", ORANGE)}
 
-PARTS = {"chiller": "Chiller", "loop": "Pumps & chilled-water loop", "tower": "Cooling tower"}
+# The parts shown follow the two detectors: the main model watches the chiller
+# and the cooling tower together (they are coupled through the condenser loop,
+# and separate models detected less), the pump detector watches the pumping loop.
+PARTS = {"main": "Chiller & cooling tower", "pumps": "Pumps & chilled-water loop"}
 SENSOR_NAMES = {
     "CHL_SW_TEMP_1": "Chiller supply water temp", "CHL_RW_TEMP_1": "Chiller return water temp",
     "CHL_SWCD_TEMP_1": "Condenser supply water temp", "CHL_RWCD_TEMP_1": "Condenser return water temp",
@@ -43,15 +46,6 @@ SENSOR_NAMES = {
     "CWL_SEC_PM_POW_2": "Pump 2 power", "CWL_SEC_CW_FLOW": "Secondary chilled water flow",
     "CWL_PRI_CW_FLOW": "Primary chilled water flow", "CWL_SEC_LOAD": "Cooling load",
 }
-
-
-def part_of(sensor):
-    """Which part of the plant a sensor belongs to (outdoor air goes with the tower)."""
-    if sensor.startswith(("CT_", "OA_", "CDWL_", "TWV")):
-        return "tower"
-    if sensor.startswith("CHL_"):
-        return "chiller"
-    return "loop"
 
 
 def severity(ratio):
@@ -129,17 +123,13 @@ def analyse(filename, test_days_only):
     per_detector = {n: z[n] / detector.thresholds[n] for n in z}
     ratio = pd.concat(per_detector.values(), axis=1)
     ratio = ratio.T.groupby(level=0).max().T
-    # Per hour: the most-affected part of the plant and the severity
-    part_ratio = pd.DataFrame({p: ratio[[s for s in ratio.columns if part_of(s) == p]].max(axis=1)
-                               for p in PARTS if any(part_of(s) == p for s in ratio.columns)})
+    # Per hour: each detector's score / threshold, the part furthest above its
+    # threshold, its most-shifted sensor and the severity
+    part_ratio = pd.DataFrame({n: hours[f"score_{n}"] / detector.thresholds[n] for n in PARTS})
     hours["part"] = part_ratio.idxmax(axis=1)
-    hours["ratio"] = ratio.max(axis=1)
-    hours["top_sensor"] = ratio.idxmax(axis=1)
+    hours["ratio"] = part_ratio.max(axis=1)
+    hours["top_sensor"] = [hours.at[h, f"sensor_{p}"] for h, p in hours["part"].items()]
     hours["severity"] = hours["ratio"].map(severity)
-    # The detector that saw the top sensor move most (for "measured vs expected")
-    hours["owner"] = [max((n for n in per_detector if s in per_detector[n].columns),
-                          key=lambda n: per_detector[n].at[h, s])
-                      for h, s in hours["top_sensor"].items()]
     return frame, hours, ratio, part_ratio
 
 
@@ -291,20 +281,20 @@ kpi(k4, "⚡", TEAL, "Edge inference (ONNX)",
 st.write("")
 
 # --- Plant overview: the cooling chain with a status badge per monitored part ---
-def node(x, label, part, shape):
+def node(x, label, part, shape, w=140):
     """One piece of equipment: an outline shape, a label and (if monitored) a status badge."""
     level = severity(part_ratio.at[hour, part]) if part in part_ratio.columns else None
     color = STATUS[level][0] if level else MUTED
     stroke = color if level and level != "Normal" else BORDER
     g = [f"<g transform='translate({x},0)'>"]
     if level and level != "Normal":
-        g.append(f"<rect class='halo' x='-74' y='18' width='148' height='118' rx='18' fill='{color}' opacity='0.35'/>")
-    g.append(f"<rect x='-70' y='22' width='140' height='110' rx='16' fill='{PANEL2}' stroke='{stroke}' stroke-width='2'/>")
+        g.append(f"<rect class='halo' x='{-w / 2 - 4}' y='18' width='{w + 8}' height='118' rx='18' fill='{color}' opacity='0.35'/>")
+    g.append(f"<rect x='{-w / 2}' y='22' width='{w}' height='110' rx='16' fill='{PANEL2}' stroke='{stroke}' stroke-width='2'/>")
     g.append(shape)
     if level:
         icon = STATUS[level][1]
-        g.append(f"<circle cx='56' cy='34' r='15' fill='{color}'/>"
-                 f"<text x='56' y='40' text-anchor='middle' font-size='16' font-weight='700' fill='{BG}'>{icon}</text>")
+        g.append(f"<circle cx='{w / 2 - 14}' cy='34' r='15' fill='{color}'/>"
+                 f"<text x='{w / 2 - 14}' y='40' text-anchor='middle' font-size='16' font-weight='700' fill='{BG}'>{icon}</text>")
         word = level if level != "Normal" else "Healthy"
         g.append(f"<text x='0' y='174' text-anchor='middle' font-size='14' fill='{color}' "
                  f"font-family='Inter,sans-serif'>{word}</text>")
@@ -330,11 +320,16 @@ tower = (f"<g stroke='{TEXT}' stroke-width='2' fill='none'><path d='M-36 108 L-2
 air = (f"<g stroke='{MUTED}' stroke-width='2' fill='none'><path d='M-40 62 h56 q14 0 14 -12 q0 -12 -14 -10'/>"
        f"<path d='M-40 78 h70 q14 0 14 12 q0 12 -14 10'/><path d='M-40 94 h40'/></g>")
 
-xs = {"servers": 110, "loop": 340, "chiller": 570, "tower": 800, "air": 1030}
+# Chiller and cooling tower share one box (one detector), joined by the condenser loop
+plant_box = (f"<g transform='translate(-95,0)'>{chiller}</g><g transform='translate(95,0)'>{tower}</g>"
+             f"<line class='pipe' x1='-45' y1='62' x2='55' y2='62' stroke='#c98500' stroke-width='3' opacity='0.8'/>"
+             f"<line class='pipe' x1='-45' y1='96' x2='55' y2='96' stroke='#c98500' stroke-width='3' opacity='0.45'/>")
+xs = {"servers": 110, "loop": 340, "main": 685, "air": 1030}
+widths = {"servers": 140, "loop": 140, "main": 370, "air": 140}
 pipes = []
-for a, b, cls, color in [("servers", "loop", "pipe-back", "#3987e5"), ("loop", "chiller", "pipe-back", "#3987e5"),
-                         ("chiller", "tower", "pipe", "#c98500"), ("tower", "air", "pipe", MUTED)]:
-    x1, x2 = xs[a] + 70, xs[b] - 70
+for a, b, cls, color in [("servers", "loop", "pipe-back", "#3987e5"), ("loop", "main", "pipe-back", "#3987e5"),
+                         ("main", "air", "pipe", MUTED)]:
+    x1, x2 = xs[a] + widths[a] / 2, xs[b] - widths[b] / 2
     pipes.append(f"<line class='{cls}' x1='{x1}' y1='62' x2='{x2}' y2='62' stroke='{color}' stroke-width='3' opacity='0.8'/>"
                  f"<line class='{cls}' x1='{x1}' y1='96' x2='{x2}' y2='96' stroke='{color}' stroke-width='3' opacity='0.45'/>")
 plant_svg = (
@@ -342,12 +337,11 @@ plant_svg = (
     "aria-label='Cooling chain from the server rooms through the pumps, chiller and cooling tower to outdoor air, with the status of each monitored part'>"
     + "".join(pipes)
     + node(xs["servers"], "Data hall load", None, servers)
-    + node(xs["loop"], PARTS["loop"].replace("Pumps & chilled-water loop", "Pumps & loop"), "loop", pump)
-    + node(xs["chiller"], PARTS["chiller"], "chiller", chiller)
-    + node(xs["tower"], PARTS["tower"], "tower", tower)
+    + node(xs["loop"], "Pumps & loop", "pumps", pump)
+    + node(xs["main"], PARTS["main"], "main", plant_box, w=widths["main"])
     + node(xs["air"], "Outdoor air", None, air)
     + "</svg>")
-st.markdown(f"<div class='panel'><div class='panel-title'>Plant overview<small>chilled water ← · → condenser water</small></div>"
+st.markdown(f"<div class='panel'><div class='panel-title'>Plant overview<small>chilled water ← · → condenser water · one status per detector</small></div>"
             f"{plant_svg}</div>", unsafe_allow_html=True)
 
 # --- Plant pulse: the last 72 analysed hours, one cell per hour ---
@@ -424,7 +418,7 @@ with right:
 # --- Fault details for the current hour ---
 st.write("")
 suspect = now["top_sensor"]
-owner = now["owner"]
+owner = now["part"]
 title = (f"{chip(plant_level)} &nbsp;{SENSOR_NAMES.get(suspect, suspect)} off its expected value - {PARTS[now['part']]}"
          if now["alarm"] else f"{chip('Normal')} &nbsp;No fault this hour - closest to its threshold: "
                               f"{SENSOR_NAMES.get(suspect, suspect)}")
@@ -467,7 +461,8 @@ with detail:
         fig = go.Figure(go.Bar(
             x=top.to_numpy(), y=[SENSOR_NAMES.get(s, s) for s in top.index], orientation="h",
             marker=dict(color=[TEAL if v > 1 else "#3A4A61" for v in top.to_numpy()], cornerradius=3),
-            customdata=[PARTS[part_of(s)] for s in top.index],
+            customdata=[" & ".join(DETECTORS[n][0] for n in PARTS if s in detector.columns[n])
+                        for s in top.index],
             hovertemplate="%{y} (%{customdata}): %{x:.2f}× threshold<extra></extra>"))
         fig.add_vline(x=1, line=dict(color=MUTED, dash="dash", width=1))
         base_layout(fig, 320, showlegend=False,
