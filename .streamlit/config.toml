@@ -1,0 +1,10 @@
+# Dark theme for the dashboard (streamlit run src/dashboard.py)
+[theme]
+base = "dark"
+primaryColor = "#3CC8BA"
+backgroundColor = "#0E1621"
+secondaryBackgroundColor = "#16212F"
+textColor = "#E8EDF3"
+
+[browser]
+gatherUsageStats = false

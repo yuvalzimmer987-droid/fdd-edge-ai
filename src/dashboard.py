@@ -1,9 +1,10 @@
+import os
 import time
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from detector import Detector, LABELS
+from detector import Detector
 from preprocessing import DATA_DIR, load_plant_file, day_split, steady_state_mask
 
 # Operator dashboard: replays one plant file hour by hour, as if the data were
@@ -11,12 +12,24 @@ from preprocessing import DATA_DIR, load_plant_file, day_split, steady_state_mas
 #
 # Run (from the project folder):  streamlit run src/dashboard.py
 # Needs: train_model.py and subsystems.py --hybrid run first.
+# Optional: data/hybrid_tradeoff.csv and data/edge_results.csv (from
+# subsystems.py --sweep and export_model.py) fill the performance tiles.
 
 START = pd.Timestamp("2021-01-01")       # the files hold one year of 1-minute data
-BLUE, ORANGE, GRAY = "#2a78d6", "#eb6834", "#8a8984"   # series colors (main, pumps, expected)
-GOOD, CRITICAL = "#0ca30c", "#d03b3b"                  # status colors, always with icon + label
-COLORS = {"main": BLUE, "pumps": ORANGE}
+
+# --- Look: dark control room, same palette as the presentation ---
+BG, PANEL, PANEL2, BORDER = "#0E1621", "#16212F", "#1C2A3C", "#26344A"
+TEXT, MUTED, TEAL, PIPE = "#E8EDF3", "#8796AB", "#3CC8BA", "#2A7F77"
+BLUE, ORANGE = "#3987e5", "#d95926"      # series: main model, pump detector
+GRID = "rgba(135,150,171,0.15)"
+# Status colors are only used for status, always with an icon and a word
+STATUS = {"Normal": ("#0ca30c", "✓"), "Minor": ("#fab219", "!"),
+          "Major": ("#ec835a", "▲"), "Critical": ("#d03b3b", "⚠")}
+SEVERITIES = ["Minor", "Major", "Critical"]
 LOG_TICKS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100]
+DETECTORS = {"main": ("Main model", BLUE), "pumps": ("Pump detector", ORANGE)}
+
+PARTS = {"chiller": "Chiller", "loop": "Pumps & chilled-water loop", "tower": "Cooling tower"}
 SENSOR_NAMES = {
     "CHL_SW_TEMP_1": "Chiller supply water temp", "CHL_RW_TEMP_1": "Chiller return water temp",
     "CHL_SWCD_TEMP_1": "Condenser supply water temp", "CHL_RWCD_TEMP_1": "Condenser return water temp",
@@ -32,14 +45,37 @@ SENSOR_NAMES = {
 }
 
 
+def part_of(sensor):
+    """Which part of the plant a sensor belongs to (outdoor air goes with the tower)."""
+    if sensor.startswith(("CT_", "OA_", "CDWL_", "TWV")):
+        return "tower"
+    if sensor.startswith("CHL_"):
+        return "chiller"
+    return "loop"
+
+
+def severity(ratio):
+    """How far above its threshold: < 2x Minor, < 5x Major, otherwise Critical."""
+    if ratio <= 1:
+        return "Normal"
+    return "Minor" if ratio < 2 else "Major" if ratio < 5 else "Critical"
+
+
 def when(hour):
     return START + pd.Timedelta(hours=int(hour))
 
 
-def sensor_label(code):
-    return f"{SENSOR_NAMES.get(code, code)} ({code})"
+def fmt(hour, pattern="%d %b, %H:00"):
+    return when(hour).strftime(pattern)
 
 
+def chip(level, text=None):
+    color, icon = STATUS[level]
+    return (f"<span class='chip' style='color:{color};border-color:{color}66;background:{color}1a'>"
+            f"{icon} {text or level}</span>")
+
+
+# --- Data (cached) ---
 @st.cache_resource
 def get_detector():
     return Detector.from_saved()
@@ -53,9 +89,26 @@ def get_catalog():
         if row["label"] == "normal":
             names[row["filename"]] = "No fault (fault-free file)"
         else:
-            severity = row["severity"] if isinstance(row["severity"], str) else ""
-            names[row["filename"]] = f"{row['fault_type'].replace('_', ' ')} {severity}".strip()
+            sev = row["severity"] if isinstance(row["severity"], str) else ""
+            names[row["filename"]] = f"{row['fault_type'].replace('_', ' ')} {sev}".strip()
     return names
+
+
+@st.cache_data
+def get_performance(budget):
+    """Detection and false alarms on test days, and the ONNX numbers, if the files exist."""
+    perf = {}
+    if os.path.exists("data/hybrid_tradeoff.csv"):
+        t = pd.read_csv("data/hybrid_tradeoff.csv")
+        row = t.loc[(t["val_budget_pct"] - budget).abs().idxmin()]
+        perf["detection"] = row["detection_all_test_pct"]
+        perf["false_alarms"] = row["false_alarm_test_pct"]
+    if os.path.exists("data/edge_results.csv"):
+        e = pd.read_csv("data/edge_results.csv", index_col=0)
+        if "ONNX fp32" in e.index:
+            perf["size_kb"] = e.at["ONNX fp32", "size_kb"]
+            perf["latency_us"] = e.at["ONNX fp32", "latency_median_us"]
+    return perf
 
 
 @st.cache_data(show_spinner="Running the detector on the whole file...")
@@ -69,27 +122,99 @@ def analyse(filename, test_days_only):
     frame = df.iloc[idx]
     z = detector.z_scores(frame, idx)
     hours = detector.hourly(frame, idx, z)
-    return frame, z, hours
+    if hours.empty:
+        return frame, hours, None, None
+    # Every sensor's shift in units of its detector's threshold (> 1 = above threshold).
+    # A few sensors are in both detectors: keep the larger value.
+    per_detector = {n: z[n] / detector.thresholds[n] for n in z}
+    ratio = pd.concat(per_detector.values(), axis=1)
+    ratio = ratio.T.groupby(level=0).max().T
+    # Per hour: the most-affected part of the plant and the severity
+    part_ratio = pd.DataFrame({p: ratio[[s for s in ratio.columns if part_of(s) == p]].max(axis=1)
+                               for p in PARTS if any(part_of(s) == p for s in ratio.columns)})
+    hours["part"] = part_ratio.idxmax(axis=1)
+    hours["ratio"] = ratio.max(axis=1)
+    hours["top_sensor"] = ratio.idxmax(axis=1)
+    hours["severity"] = hours["ratio"].map(severity)
+    # The detector that saw the top sensor move most (for "measured vs expected")
+    hours["owner"] = [max((n for n in per_detector if s in per_detector[n].columns),
+                          key=lambda n: per_detector[n].at[h, s])
+                      for h, s in hours["top_sensor"].items()]
+    return frame, hours, ratio, part_ratio
 
 
-# --- Sidebar: what to replay ---
-st.set_page_config(page_title="Chiller plant FDD", layout="wide")
+def events(hours, max_gap=3):
+    """Group alarm hours into events: alarms less than max_gap analysed hours apart."""
+    alarm = hours[hours["alarm"]]
+    out, current = [], None
+    for h, row in alarm.iterrows():
+        if current is not None and h - current["end"] <= max_gap:
+            current["end"] = h
+            current["hours"] += 1
+            if row["ratio"] > current["ratio"]:
+                current.update(ratio=row["ratio"], part=row["part"], sensor=row["top_sensor"])
+        else:
+            current = dict(start=h, end=h, hours=1, ratio=row["ratio"],
+                           part=row["part"], sensor=row["top_sensor"])
+            out.append(current)
+    return out
+
+
+# --- Page setup ---
+st.set_page_config(page_title="Chiller Plant FDD", page_icon="❄", layout="wide")
+st.markdown(f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+.stApp {{ background: radial-gradient(1200px 500px at 70% -10%, #13293a 0%, {BG} 60%); }}
+h1, h2, h3, h4, .kpi-value, .brand {{ font-family: 'Space Grotesk', sans-serif !important; }}
+.block-container {{ padding-top: 1.6rem; }}
+.panel {{ background:{PANEL}; border:1px solid {BORDER}; border-radius:14px; padding:16px 18px; height:100%; }}
+.panel-title {{ font-family:'Space Grotesk',sans-serif; font-size:1.02rem; font-weight:600; color:{TEXT}; margin-bottom:10px; }}
+.panel-title small {{ font-family:'JetBrains Mono',monospace; color:{MUTED}; font-weight:400; font-size:0.72rem; margin-left:8px; }}
+.mono {{ font-family:'JetBrains Mono',monospace; }}
+.muted {{ color:{MUTED}; }}
+.chip {{ display:inline-block; border:1px solid; border-radius:999px; padding:1px 10px; font-size:0.78rem; font-weight:600; white-space:nowrap; }}
+.kpi {{ display:flex; gap:14px; align-items:center; }}
+.kpi-icon {{ width:46px; height:46px; border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:1.3rem; flex-shrink:0; }}
+.kpi-label {{ color:{MUTED}; font-size:0.8rem; }}
+.kpi-value {{ color:{TEXT}; font-size:1.55rem; font-weight:600; line-height:1.2; }}
+.kpi-sub {{ color:{MUTED}; font-size:0.78rem; }}
+table.log {{ width:100%; border-collapse:collapse; font-size:0.84rem; }}
+table.log th {{ text-align:left; color:{MUTED}; font-weight:500; font-size:0.74rem; padding:6px 8px; border-bottom:1px solid {BORDER}; }}
+table.log td {{ padding:7px 8px; border-bottom:1px solid {BORDER}55; color:{TEXT}; }}
+table.log td.mono {{ white-space:nowrap; }}
+table.log tr.open td {{ background:{TEAL}0d; }}
+.pulse {{ display:flex; gap:3px; flex-wrap:nowrap; }}
+.pulse div {{ flex:1; height:26px; border-radius:3px; }}
+@keyframes flow {{ to {{ stroke-dashoffset: -24; }} }}
+.pipe {{ stroke-dasharray: 8 6; animation: flow 1.4s linear infinite; }}
+.pipe-back {{ stroke-dasharray: 8 6; animation: flow 1.4s linear infinite reverse; }}
+@keyframes glow {{ 0%,100% {{ opacity:0.25; }} 50% {{ opacity:0.7; }} }}
+.halo {{ animation: glow 1.6s ease-in-out infinite; }}
+</style>""", unsafe_allow_html=True)
+
 detector = get_detector()
 catalog = get_catalog()
 files = list(catalog)
 default = next(i for i, f in enumerate(files) if f != "ChillerPlant.csv")
 
 with st.sidebar:
-    st.header("Replay")
+    st.markdown(f"<div class='brand' style='font-size:1.35rem;font-weight:600'>❄ Plant FDD "
+                f"<span style='color:{TEAL}'>· edge</span></div>"
+                f"<div class='muted' style='font-size:0.8rem;margin-bottom:18px'>Replay of the LBNL chiller plant</div>",
+                unsafe_allow_html=True)
     filename = st.selectbox("Plant file", files, index=default, format_func=catalog.get)
     test_days_only = st.toggle("Test days only", value=True,
                                help="Days the models never saw in training or threshold setting.")
-    step = st.select_slider("Hours per step", [1, 3, 6, 24], value=3)
+    step = st.select_slider("Hours per step", [1, 3, 6, 24], value=1)
     delay = st.select_slider("Seconds between steps", [0.2, 0.5, 1.0, 2.0], value=0.5)
-    st.caption(f"Detector: main model + pump detector, thresholds for a "
-               f"{detector.budget:g}% false-alarm budget on normal hours.")
+    st.markdown(f"<div class='muted' style='font-size:0.78rem;margin-top:14px'>"
+                f"Severity = how far the most-shifted sensor is above its threshold: "
+                f"{chip('Minor', 'Minor &lt;2×')} {chip('Major', 'Major &lt;5×')} {chip('Critical', 'Critical ≥5×')}"
+                f"<br><br>Thresholds: {detector.budget:g}% false-alarm budget on normal hours.</div>",
+                unsafe_allow_html=True)
 
-frame, z, hours = analyse(filename, test_days_only)
+frame, hours, ratio, part_ratio = analyse(filename, test_days_only)
 if hours.empty:
     st.warning("No steady-state hours in this selection.")
     st.stop()
@@ -113,156 +238,285 @@ if st.session_state.playing:
     if st.session_state.pos >= n - 1:
         st.session_state.playing = False
 
-# --- Header and controls ---
-st.title("Chiller plant fault detection")
-st.caption(f"Replaying **{catalog[filename]}** - {n} steady-state hours analysed")
-c1, c2, c3, c4 = st.columns([1, 1, 1, 6])
-c1.button("◀ Back", on_click=move, args=(-step,), width="stretch")
-c2.button("Pause" if st.session_state.playing else "▶ Play", on_click=toggle_play,
-          width="stretch")
-c3.button("Next ▶", on_click=move, args=(step,), width="stretch")
-c4.slider("Hour", 0, n - 1, key="pos", label_visibility="collapsed")
-
 pos = st.session_state.pos
 hour = hours.index[pos]
 now = hours.loc[hour]
-names = list(z)
-
-# --- Status tiles ---
-def tile(column, title, alarm, detail):
-    color, icon, word = (CRITICAL, "⚠", "ALARM") if alarm else (GOOD, "✓", "Normal")
-    column.markdown(
-        f"<div style='border-left:6px solid {color};background:{color}1f;border-radius:8px;"
-        f"padding:12px 16px'><div style='font-size:0.85rem;opacity:0.8'>{title}</div>"
-        f"<div style='font-size:1.5rem;font-weight:600'>{icon} {word}</div>"
-        f"<div style='font-size:0.85rem;opacity:0.8'>{detail}</div></div>",
-        unsafe_allow_html=True)
-
-
-st.subheader(when(hour).strftime("%d %b, %H:00"), anchor=False)
-cols = st.columns(len(names) + 2)
-tile(cols[0], "Plant", now["alarm"],
-     f"Fault in the {now['subsystem']}" if now["alarm"] else "All detectors below threshold")
-for col, name in zip(cols[1:], names):
-    ratio = now[f"score_{name}"] / detector.thresholds[name]
-    tile(col, LABELS[name].capitalize(), now[f"alarm_{name}"], f"Score {ratio:.2f}× threshold")
-with cols[-1]:
-    worst = max(names, key=lambda m: now[f"score_{m}"] / detector.thresholds[m])
-    suspect = now["suspect_sensor"] if now["alarm"] else now[f"sensor_{worst}"]
-    st.markdown(
-        f"<div style='border-left:6px solid {GRAY};border-radius:8px;padding:12px 16px'>"
-        f"<div style='font-size:0.85rem;opacity:0.8'>{'Suspect sensor' if now['alarm'] else 'Most-shifted sensor'}</div>"
-        f"<div style='font-size:1.1rem;font-weight:600'>{SENSOR_NAMES.get(suspect, suspect)}</div>"
-        f"<div style='font-size:0.85rem;opacity:0.8'>{suspect}</div></div>",
-        unsafe_allow_html=True)
-
-# --- Timeline: score / threshold of each detector, every hour replayed so far ---
-# One step per analysed hour, so the hours when the plant was off (or days
-# that are not test days) take no space; lines break where time jumps.
-st.markdown("#### Detector scores over time")
-past = hours.loc[:hour]
-hrs = past.index.to_numpy()
-jump = np.r_[False, np.diff(hrs) > 1]
-xs, ids = [], []
-for p, (h, j) in enumerate(zip(hrs, jump)):
-    if j:
-        xs.append(p - 0.5)
-        ids.append(None)                 # a gap in the line
-    xs.append(p)
-    ids.append(h)
-labels = [when(h).strftime("%d %b, %H:00") if h is not None else "" for h in ids]
-fig = go.Figure()
-for name in names:
-    ratio = past[f"score_{name}"] / detector.thresholds[name]
-    fig.add_trace(go.Scatter(
-        x=xs, y=[ratio[h] if h is not None else None for h in ids], name=LABELS[name].capitalize(),
-        mode="lines", line=dict(color=COLORS[name], width=2), customdata=labels,
-        hovertemplate="%{customdata}<br>%{y:.2f}× threshold<extra>" + LABELS[name] + "</extra>"))
-alarm_pos = np.flatnonzero(past["alarm"].to_numpy())
-fig.add_trace(go.Scatter(
-    x=alarm_pos, y=[0.15] * len(alarm_pos), name="Alarm hour", mode="markers",
-    marker=dict(symbol="line-ns-open", size=10, color=CRITICAL, line=dict(width=2)),
-    customdata=np.c_[[when(h).strftime("%d %b, %H:00") for h in hrs[alarm_pos]],
-                     past["suspect_sensor"].to_numpy()[alarm_pos]],
-    hovertemplate="%{customdata[0]}<br>Alarm - suspect %{customdata[1]}<extra></extra>"))
-fig.add_hline(y=1, line=dict(color=GRAY, dash="dash", width=1),
-              annotation_text="threshold", annotation_position="top left")
-day_start = np.flatnonzero(np.r_[True, np.diff(hrs // 24) > 0])
-day_start = day_start[::max(1, len(day_start) // 10)]     # at most ~10 date labels
-fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), hovermode="closest",
-                  yaxis=dict(type="log", title="score ÷ threshold", gridcolor="rgba(128,128,128,0.15)",
-                             tickvals=LOG_TICKS, ticktext=[f"{v:g}" for v in LOG_TICKS]),
-                  xaxis=dict(tickvals=day_start, ticktext=[when(hrs[i]).strftime("%d %b") for i in day_start],
-                             gridcolor="rgba(128,128,128,0.15)", range=[-0.5, max(len(hrs) - 0.5, 24)]),
-                  legend=dict(orientation="h", y=1.12, x=0))
-st.plotly_chart(fig, width="stretch")
-st.caption("Each step is one hour with the chiller running; the gaps are hours or days that are not shown.")
-
-left, right = st.columns(2)
-
-# --- Why this hour: the most-shifted sensors, both detectors on one scale ---
-with left:
-    st.markdown("#### Most-shifted sensors this hour")
-    rows = []
-    for name in names:
-        for sensor, value in z[name].loc[hour].items():
-            rows.append((name, sensor, value / detector.thresholds[name]))
-    top = pd.DataFrame(rows, columns=["detector", "sensor", "ratio"]).nlargest(8, "ratio")[::-1]
-    fig = go.Figure()
-    for name in names:
-        part = top[top["detector"] == name]
-        fig.add_trace(go.Bar(
-            x=part["ratio"], y=[SENSOR_NAMES.get(s, s) for s in part["sensor"]], orientation="h",
-            name=LABELS[name].capitalize(), marker=dict(color=COLORS[name], cornerradius=4),
-            hovertemplate="%{y}: %{x:.2f}× threshold<extra></extra>"))
-    fig.add_vline(x=1, line=dict(color=GRAY, dash="dash", width=1))
-    fig.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), barmode="overlay", showlegend=True,
-                      yaxis=dict(categoryorder="array", categoryarray=[SENSOR_NAMES.get(s, s) for s in top["sensor"]]),
-                      xaxis=dict(type="log", title="shift ÷ detector threshold (dashed line = threshold)",
-                                 gridcolor="rgba(128,128,128,0.15)", tickvals=LOG_TICKS,
-                                 ticktext=[f"{v:g}" for v in LOG_TICKS],
-                                 range=[-1, np.log10(max(top["ratio"].max(), 2) * 1.5)]),
-                      legend=dict(orientation="h", y=1.12, x=0))
-    st.plotly_chart(fig, width="stretch")
-
-# --- The suspect sensor: measured vs what the model expects, last 24 hours ---
-with right:
-    st.markdown(f"#### {SENSOR_NAMES.get(suspect, suspect)}: measured vs expected")
-    owner = next(m for m in names if suspect in detector.columns[m])
-    rows_idx = frame.index.to_numpy()
-    window = frame[(rows_idx >= (hour - 23) * 60) & (rows_idx < (hour + 1) * 60)]
-    expected = detector.expected(window, owner)[suspect]
-    t = [START + pd.Timedelta(minutes=int(i)) for i in window.index]
-    gaps = np.diff(window.index.to_numpy(), prepend=window.index[0]) > 1   # break lines when off
-    measured = window[suspect].where(~gaps)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=t, y=measured, name="Measured", mode="lines",
-                             line=dict(color=COLORS[owner], width=2)))
-    fig.add_trace(go.Scatter(x=t, y=expected.where(~gaps), name="Expected by the model", mode="lines",
-                             line=dict(color=GRAY, width=2, dash="dash")))
-    fig.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), hovermode="x unified",
-                      yaxis=dict(title=suspect, gridcolor="rgba(128,128,128,0.15)"),
-                      xaxis=dict(showgrid=False), legend=dict(orientation="h", y=1.12, x=0))
-    st.plotly_chart(fig, width="stretch")
-    st.caption("Last 24 hours of steady-state data. A gap that stays between the two lines "
-               "for hours is what raises the alarm.")
-
-# --- Summary of the replay so far, and the alarm log ---
 so_far = hours.loc[:hour]
-m1, m2, m3 = st.columns(3)
-m1.metric("Hours replayed", len(so_far))
-m2.metric("Hours with an alarm", f"{so_far['alarm'].mean() * 100:.1f}%")
-m3.metric("First alarm", when(so_far.index[so_far["alarm"]][0]).strftime("%d %b, %H:00")
-          if so_far["alarm"].any() else "-")
+plant_level = now["severity"]
 
-with st.expander("Alarm log (table view)"):
-    log = so_far[so_far["alarm"]].copy()
-    log.insert(0, "time", [when(h).strftime("%d %b, %H:00") for h in log.index])
-    for name in names:
-        log[f"{name} score ÷ threshold"] = (log[f"score_{name}"] / detector.thresholds[name]).round(2)
-    st.dataframe(log[["time", "subsystem", "suspect_sensor"]
-                     + [f"{n} score ÷ threshold" for n in names]][::-1],
-                 hide_index=True, width="stretch")
+# --- Header: title, replay clock and controls ---
+head, clock = st.columns([3, 2])
+head.markdown(f"<h1 style='margin:0;font-size:2rem'>Chiller Plant FDD</h1>"
+              f"<div class='muted'>AI fault detection on the edge · replaying "
+              f"<b style='color:{TEXT}'>{catalog[filename]}</b></div>", unsafe_allow_html=True)
+clock.markdown(f"<div style='text-align:right'><span class='mono muted' style='font-size:0.78rem'>REPLAY TIME</span><br>"
+               f"<span class='brand' style='font-size:1.6rem;color:{TEXT}'>{fmt(hour, '%a %d %b · %H:00')}</span><br>"
+               f"<span class='mono muted' style='font-size:0.78rem'>hour {pos + 1} of {n} analysed</span></div>",
+               unsafe_allow_html=True)
+c1, c2, c3, c4 = st.columns([1, 1, 1, 7])
+c1.button("◀ Back", on_click=move, args=(-step,), width="stretch")
+c2.button("❚❚ Pause" if st.session_state.playing else "▶ Play", on_click=toggle_play,
+          width="stretch", type="primary")
+c3.button("Next ▶", on_click=move, args=(step,), width="stretch")
+c4.slider("Hour", 0, n - 1, key="pos", label_visibility="collapsed")
+
+# --- KPI tiles ---
+perf = get_performance(detector.budget)
+alarm_parts = [p for p in part_ratio.columns if part_ratio.at[hour, p] > 1]
+
+
+def kpi(column, icon, color, label, value, sub):
+    column.markdown(
+        f"<div class='panel kpi'><div class='kpi-icon' style='background:{color}22;color:{color}'>{icon}</div>"
+        f"<div><div class='kpi-label'>{label}</div><div class='kpi-value'>{value}</div>"
+        f"<div class='kpi-sub'>{sub}</div></div></div>", unsafe_allow_html=True)
+
+
+k1, k2, k3, k4 = st.columns(4)
+color, icon = STATUS[plant_level]
+kpi(k1, icon, color, "Plant status", "Normal" if plant_level == "Normal" else f"{plant_level} alarm",
+    "all parts below threshold" if not alarm_parts else
+    f"{len(alarm_parts)} part{'s' if len(alarm_parts) > 1 else ''} in alarm")
+kpi(k2, "◷", TEAL, "Alarm hours in this replay", f"{int(so_far['alarm'].sum())} / {len(so_far)}",
+    f"{so_far['alarm'].mean() * 100:.1f}% of analysed hours")
+kpi(k3, "◎", TEAL, "Detector on test days",
+    f"{perf['detection']:.1f}%" if "detection" in perf else "-",
+    f"faults detected · {perf['false_alarms']:.2f}% false alarms" if "detection" in perf
+    else "run subsystems.py --hybrid --sweep")
+kpi(k4, "⚡", TEAL, "Edge inference (ONNX)",
+    f"{perf['latency_us']:.0f} µs / min" if "latency_us" in perf else "1-hour windows",
+    f"{perf['size_kb']:.1f} KB for both models · decision every hour" if "size_kb" in perf
+    else "run export_model.py for edge numbers")
+
+st.write("")
+
+# --- Plant overview: the cooling chain with a status badge per monitored part ---
+def node(x, label, part, shape):
+    """One piece of equipment: an outline shape, a label and (if monitored) a status badge."""
+    level = severity(part_ratio.at[hour, part]) if part in part_ratio.columns else None
+    color = STATUS[level][0] if level else MUTED
+    stroke = color if level and level != "Normal" else BORDER
+    g = [f"<g transform='translate({x},0)'>"]
+    if level and level != "Normal":
+        g.append(f"<rect class='halo' x='-74' y='18' width='148' height='118' rx='18' fill='{color}' opacity='0.35'/>")
+    g.append(f"<rect x='-70' y='22' width='140' height='110' rx='16' fill='{PANEL2}' stroke='{stroke}' stroke-width='2'/>")
+    g.append(shape)
+    if level:
+        icon = STATUS[level][1]
+        g.append(f"<circle cx='56' cy='34' r='15' fill='{color}'/>"
+                 f"<text x='56' y='40' text-anchor='middle' font-size='16' font-weight='700' fill='{BG}'>{icon}</text>")
+        word = level if level != "Normal" else "Healthy"
+        g.append(f"<text x='0' y='174' text-anchor='middle' font-size='14' fill='{color}' "
+                 f"font-family='Inter,sans-serif'>{word}</text>")
+    else:
+        g.append(f"<text x='0' y='174' text-anchor='middle' font-size='13' fill='{MUTED}' "
+                 f"font-family='Inter,sans-serif'>not monitored</text>")
+    g.append(f"<text x='0' y='156' text-anchor='middle' font-size='15' font-weight='600' fill='{TEXT}' "
+             f"font-family='Space Grotesk,sans-serif'>{label}</text></g>")
+    return "".join(g)
+
+
+servers = (f"<g stroke='{MUTED}' stroke-width='2' fill='none'>" +
+           "".join(f"<rect x='{-36 + i * 26}' y='46' width='20' height='62' rx='3'/>"
+                   f"<line x1='{-32 + i * 26}' y1='58' x2='{-20 + i * 26}' y2='58'/>"
+                   f"<line x1='{-32 + i * 26}' y1='68' x2='{-20 + i * 26}' y2='68'/>" for i in range(3)) + "</g>")
+pump = (f"<g stroke='{TEXT}' stroke-width='2' fill='none'><circle cx='-14' cy='78' r='22'/>"
+        f"<path d='M-24 66 L-2 78 L-24 90 Z'/><circle cx='30' cy='78' r='14'/><path d='M23 70 L37 78 L23 86 Z'/></g>")
+chiller = (f"<g stroke='{TEXT}' stroke-width='2' fill='none'><rect x='-44' y='52' width='88' height='52' rx='6'/>"
+           f"<line x1='-30' y1='64' x2='30' y2='64'/><line x1='-30' y1='76' x2='30' y2='76'/>"
+           f"<line x1='-30' y1='88' x2='30' y2='88'/><circle cx='-30' cy='45' r='6'/><circle cx='30' cy='45' r='6'/></g>")
+tower = (f"<g stroke='{TEXT}' stroke-width='2' fill='none'><path d='M-36 108 L-26 52 L26 52 L36 108 Z'/>"
+         f"<ellipse cx='0' cy='52' rx='26' ry='7'/><path d='M-10 40 q5 -8 10 0 q5 8 10 0'/></g>")
+air = (f"<g stroke='{MUTED}' stroke-width='2' fill='none'><path d='M-40 62 h56 q14 0 14 -12 q0 -12 -14 -10'/>"
+       f"<path d='M-40 78 h70 q14 0 14 12 q0 12 -14 10'/><path d='M-40 94 h40'/></g>")
+
+xs = {"servers": 110, "loop": 340, "chiller": 570, "tower": 800, "air": 1030}
+pipes = []
+for a, b, cls, color in [("servers", "loop", "pipe-back", "#3987e5"), ("loop", "chiller", "pipe-back", "#3987e5"),
+                         ("chiller", "tower", "pipe", "#c98500"), ("tower", "air", "pipe", MUTED)]:
+    x1, x2 = xs[a] + 70, xs[b] - 70
+    pipes.append(f"<line class='{cls}' x1='{x1}' y1='62' x2='{x2}' y2='62' stroke='{color}' stroke-width='3' opacity='0.8'/>"
+                 f"<line class='{cls}' x1='{x1}' y1='96' x2='{x2}' y2='96' stroke='{color}' stroke-width='3' opacity='0.45'/>")
+plant_svg = (
+    "<svg viewBox='0 0 1140 190' width='100%' role='img' "
+    "aria-label='Cooling chain from the server rooms through the pumps, chiller and cooling tower to outdoor air, with the status of each monitored part'>"
+    + "".join(pipes)
+    + node(xs["servers"], "Data hall load", None, servers)
+    + node(xs["loop"], PARTS["loop"].replace("Pumps & chilled-water loop", "Pumps & loop"), "loop", pump)
+    + node(xs["chiller"], PARTS["chiller"], "chiller", chiller)
+    + node(xs["tower"], PARTS["tower"], "tower", tower)
+    + node(xs["air"], "Outdoor air", None, air)
+    + "</svg>")
+st.markdown(f"<div class='panel'><div class='panel-title'>Plant overview<small>chilled water ← · → condenser water</small></div>"
+            f"{plant_svg}</div>", unsafe_allow_html=True)
+
+# --- Plant pulse: the last 72 analysed hours, one cell per hour ---
+recent = hours.iloc[max(0, pos - 71):pos + 1]
+cells = []
+for h, row in recent.iterrows():
+    level = row["severity"]
+    fill = "#1d4f4b" if level == "Normal" else STATUS[level][0]
+    outline = f"outline:2px solid {TEXT};outline-offset:1px;" if h == hour else ""
+    tip = f"{fmt(h)} - {level}" + ("" if level == "Normal" else f" - {SENSOR_NAMES.get(row['top_sensor'], row['top_sensor'])}")
+    cells.append(f"<div title='{tip}' style='background:{fill};{outline}'></div>")
+cells += ["<div style='background:transparent'></div>"] * (72 - len(recent))
+st.markdown(f"<div class='panel' style='margin-top:14px'><div class='panel-title'>Plant pulse"
+            f"<small>last {len(recent)} analysed hours · hover a cell</small></div>"
+            f"<div class='pulse'>{''.join(cells)}</div>"
+            f"<div class='muted mono' style='display:flex;justify-content:space-between;font-size:0.72rem;margin-top:6px'>"
+            f"<span>{fmt(recent.index[0])}</span><span>now</span></div></div>", unsafe_allow_html=True)
+st.write("")
+
+# --- Fault events and trends ---
+left, right = st.columns([3, 2])
+with left:
+    ev = events(so_far)[::-1][:8]
+    rows = []
+    for e in ev:
+        is_open = e["end"] == hour or (now["alarm"] and e is ev[0] and hour - e["end"] <= 3)
+        status = (f"<span class='chip' style='color:{TEAL};border-color:{TEAL}66'>● Open</span>" if is_open
+                  else "<span class='muted'>Closed</span>")
+        rows.append(f"<tr class='{'open' if is_open else ''}'><td class='mono'>{fmt(e['start'])}</td>"
+                    f"<td>{chip(severity(e['ratio']))}</td><td>{PARTS[e['part']]}</td>"
+                    f"<td>{SENSOR_NAMES.get(e['sensor'], e['sensor'])}<br><span class='muted mono' style='font-size:0.72rem'>{e['sensor']}</span></td>"
+                    f"<td class='mono'>{e['hours']} h</td><td class='mono'>{e['ratio']:.1f}×</td><td>{status}</td></tr>")
+    body = "".join(rows) if rows else f"<tr><td colspan='7' class='muted'>No alarms so far.</td></tr>"
+    st.markdown(f"<div class='panel'><div class='panel-title'>Fault events<small>alarm hours grouped into events</small></div>"
+                f"<table class='log'><tr><th>Started</th><th>Severity</th><th>Part</th><th>Most-shifted sensor</th>"
+                f"<th>Duration</th><th>Peak</th><th>Status</th></tr>{body}</table></div>", unsafe_allow_html=True)
+
+
+def base_layout(fig, height, **kw):
+    fig.update_layout(height=height, margin=dict(l=8, r=8, t=8, b=8), paper_bgcolor="rgba(0,0,0,0)",
+                      plot_bgcolor="rgba(0,0,0,0)", font=dict(color=TEXT, family="Inter, sans-serif", size=12),
+                      legend=dict(orientation="h", y=1.15, x=0, font=dict(size=11)), **kw)
+    return fig
+
+
+with right:
+    with st.container(border=True):
+        st.markdown("<div class='panel-title'>Fault trend<small>alarm hours per day, by severity</small></div>",
+                    unsafe_allow_html=True)
+        alarms = so_far[so_far["alarm"]]
+        day = so_far.index // 24
+        days = pd.Index(sorted(set(day)))[-10:]
+        fig = go.Figure()
+        for level in SEVERITIES:
+            counts = alarms[alarms["severity"] == level].groupby(alarms[alarms["severity"] == level].index // 24).size()
+            fig.add_trace(go.Bar(x=[fmt(d * 24, "%d %b") for d in days], y=counts.reindex(days, fill_value=0),
+                                 name=level, marker=dict(color=STATUS[level][0], cornerradius=3,
+                                                         line=dict(color=PANEL, width=1)),
+                                 hovertemplate="%{x}: %{y} h " + level + "<extra></extra>"))
+        base_layout(fig, 210, barmode="stack", bargap=0.35,
+                    yaxis=dict(gridcolor=GRID, title="hours", dtick=6), xaxis=dict(type="category"))
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+
+        st.markdown("<div class='panel-title'>Alarm hours by part</div>", unsafe_allow_html=True)
+        by_part = alarms["part"].value_counts().reindex(list(PARTS), fill_value=0)
+        fig = go.Figure(go.Bar(x=by_part.to_numpy(), y=[PARTS[p] for p in by_part.index], orientation="h",
+                               marker=dict(color=TEAL, cornerradius=3), text=by_part.to_numpy(),
+                               textposition="outside", cliponaxis=False,
+                               hovertemplate="%{y}: %{x} alarm hours<extra></extra>"))
+        base_layout(fig, 140, xaxis=dict(gridcolor=GRID, visible=False),
+                    yaxis=dict(autorange="reversed"), showlegend=False)
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+
+# --- Fault details for the current hour ---
+st.write("")
+suspect = now["top_sensor"]
+owner = now["owner"]
+title = (f"{chip(plant_level)} &nbsp;{SENSOR_NAMES.get(suspect, suspect)} off its expected value - {PARTS[now['part']]}"
+         if now["alarm"] else f"{chip('Normal')} &nbsp;No fault this hour - closest to its threshold: "
+                              f"{SENSOR_NAMES.get(suspect, suspect)}")
+st.markdown(f"<div class='panel-title' style='font-size:1.15rem'>Fault details &amp; diagnosis</div>"
+            f"<div style='margin-bottom:6px'>{title}</div>", unsafe_allow_html=True)
+
+detail, diagnosis = st.columns([3, 1])
+with detail:
+    tab_trend, tab_sensors, tab_scores = st.tabs(["Sensor trend", "Contributing sensors", "Detector scores"])
+
+    with tab_trend:
+        idx = frame.index.to_numpy()
+        window = frame[(idx >= (hour - 23) * 60) & (idx < (hour + 1) * 60)]
+        expected = detector.expected(window, owner)[suspect]
+        t = [START + pd.Timedelta(minutes=int(i)) for i in window.index]
+        gaps = np.diff(window.index.to_numpy(), prepend=window.index[0]) > 1
+        fig = go.Figure()
+        for h in hours.index[(hours.index >= hour - 23) & (hours.index <= hour)]:
+            if hours.at[h, "alarm"]:
+                fig.add_vrect(x0=when(h), x1=when(h + 1), fillcolor=STATUS[hours.at[h, "severity"]][0],
+                              opacity=0.13, line_width=0)
+        fig.add_trace(go.Scatter(x=t, y=window[suspect].where(~gaps), name="Measured", mode="lines",
+                                 line=dict(color=DETECTORS[owner][1], width=2)))
+        fig.add_trace(go.Scatter(x=t, y=expected.where(~gaps), name="Expected by the model", mode="lines",
+                                 line=dict(color=MUTED, width=2, dash="dash")))
+        fig.add_trace(go.Bar(x=[None], y=[None], name="Alarm hour", marker=dict(color=STATUS["Critical"][0], opacity=0.4)))
+        base_layout(fig, 300, hovermode="x unified", yaxis=dict(title=suspect, gridcolor=GRID),
+                    xaxis=dict(showgrid=False))
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+        latest = window[window.index >= hour * 60]
+        dev = (latest[suspect] - detector.expected(latest, owner)[suspect]).mean()
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Measured (hour mean)", f"{latest[suspect].mean():.2f}")
+        m2.metric("Expected (hour mean)", f"{(latest[suspect] - dev).mean():.2f}")
+        m3.metric("Deviation", f"{dev:+.2f}")
+        m4.metric("Shift vs threshold", f"{ratio.at[hour, suspect]:.2f}×")
+
+    with tab_sensors:
+        top = ratio.loc[hour].nlargest(8)[::-1]
+        fig = go.Figure(go.Bar(
+            x=top.to_numpy(), y=[SENSOR_NAMES.get(s, s) for s in top.index], orientation="h",
+            marker=dict(color=[TEAL if v > 1 else "#3A4A61" for v in top.to_numpy()], cornerradius=3),
+            customdata=[PARTS[part_of(s)] for s in top.index],
+            hovertemplate="%{y} (%{customdata}): %{x:.2f}× threshold<extra></extra>"))
+        fig.add_vline(x=1, line=dict(color=MUTED, dash="dash", width=1))
+        base_layout(fig, 320, showlegend=False,
+                    xaxis=dict(type="log", title="shift ÷ threshold (dashed line = threshold)", gridcolor=GRID,
+                               tickvals=LOG_TICKS, ticktext=[f"{v:g}" for v in LOG_TICKS],
+                               range=[-1, np.log10(max(top.max(), 2) * 1.5)]))
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+        st.caption("Teal = above its threshold. The sensors that move most show where the fault appears, "
+                   "which is not always the faulty component itself.")
+
+    with tab_scores:
+        hrs = so_far.index.to_numpy()
+        jump = np.r_[False, np.diff(hrs) > 1]
+        xs_, ids = [], []
+        for p, (h, j) in enumerate(zip(hrs, jump)):
+            if j:
+                xs_.append(p - 0.5)
+                ids.append(None)
+            xs_.append(p)
+            ids.append(h)
+        labels = [fmt(h) if h is not None else "" for h in ids]
+        fig = go.Figure()
+        for d, (label, color) in DETECTORS.items():
+            r = so_far[f"score_{d}"] / detector.thresholds[d]
+            fig.add_trace(go.Scatter(x=xs_, y=[r[h] if h is not None else None for h in ids], name=label,
+                                     mode="lines", line=dict(color=color, width=2), customdata=labels,
+                                     hovertemplate="%{customdata}<br>%{y:.2f}× threshold<extra>" + label + "</extra>"))
+        fig.add_hline(y=1, line=dict(color=MUTED, dash="dash", width=1),
+                      annotation_text="threshold", annotation_position="top left")
+        day_start = np.flatnonzero(np.r_[True, np.diff(hrs // 24) > 0])
+        day_start = day_start[::max(1, len(day_start) // 8)]
+        base_layout(fig, 300, hovermode="closest",
+                    yaxis=dict(type="log", title="score ÷ threshold", gridcolor=GRID,
+                               tickvals=LOG_TICKS, ticktext=[f"{v:g}" for v in LOG_TICKS]),
+                    xaxis=dict(tickvals=day_start, ticktext=[fmt(hrs[i], "%d %b") for i in day_start],
+                               gridcolor=GRID, range=[-0.5, max(len(hrs) - 0.5, 24)]))
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+        st.caption("One step per analysed hour; the gaps are hours when the chiller was off or days not shown.")
+
+with diagnosis:
+    st.markdown(
+        f"<div class='panel'><div class='panel-title'>Diagnosis</div>"
+        f"<div class='muted' style='font-size:0.85rem'>Likely fault type and recommended checks will appear "
+        f"here once the diagnosis model is trained.</div>"
+        f"<div style='margin-top:14px;font-size:0.85rem'><span class='muted'>Detected by</span><br>"
+        f"{DETECTORS[owner][0]} (autoencoder, hourly max-z)</div>"
+        f"<div style='margin-top:10px;font-size:0.85rem'><span class='muted'>Part</span><br>{PARTS[now['part']]}</div>"
+        f"<div style='margin-top:10px;font-size:0.85rem'><span class='muted'>Sensor</span><br>"
+        f"<span class='mono'>{suspect}</span></div></div>", unsafe_allow_html=True)
 
 if st.session_state.playing:
     time.sleep(delay)
