@@ -104,7 +104,7 @@ class Detector:
         """Columns to read from a plant CSV (CHL_POW_1 for the steady-state mask)."""
         return sorted({c for cols in self.columns.values() for c in cols} | {"CHL_POW_1"})
 
-    def _z(self, frame, idx):
+    def z_scores(self, frame, idx):
         """Per detector: |z| of every sensor's hourly mean residual."""
         z = {}
         for name, predict in self.predictors.items():
@@ -119,17 +119,18 @@ class Detector:
             x = self.scalers[name].transform(frame[self.columns[name]]).astype(np.float32)
             win = window_means(idx, predict(x) - x, self.columns[name])
             self.center[name], self.spread[name] = win.mean().to_numpy(), win.std().to_numpy()
-        scores = pd.DataFrame({name: z.max(axis=1) for name, z in self._z(frame, idx).items()})
+        scores = pd.DataFrame({name: z.max(axis=1) for name, z in self.z_scores(frame, idx).items()})
         self.thresholds = find_thresholds(scores, budget)
         self.budget = budget
 
-    def hourly(self, frame, idx):
+    def hourly(self, frame, idx, z=None):
         """One row per hour: score and alarm of each detector, and the overall verdict.
 
         frame = steady-state rows of a plant file, idx = their row numbers in
-        the file (used to group them into hours).
+        the file (used to group them into hours). z = z_scores(frame, idx), if
+        already computed.
         """
-        z = self._z(frame, idx)
+        z = self.z_scores(frame, idx) if z is None else z
         out = pd.DataFrame(index=next(iter(z.values())).index)
         out.index.name = "hour"
         for name, zn in z.items():
@@ -146,6 +147,12 @@ class Detector:
         sensor = [out.at[h, f"sensor_{w}"] for h, w in worst.items()]
         out["suspect_sensor"] = np.where(out["alarm"], sensor, "")
         return out
+
+    def expected(self, frame, name):
+        """What the model expects each sensor of one detector to read (original units)."""
+        x = self.scalers[name].transform(frame[self.columns[name]]).astype(np.float32)
+        recon = self.scalers[name].inverse_transform(self.predictors[name](x))
+        return pd.DataFrame(recon, index=frame.index, columns=self.columns[name])
 
     def hourly_file(self, df, rows=None):
         """hourly() for a whole plant file, after the steady-state filter.
