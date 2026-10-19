@@ -422,10 +422,10 @@ owner = now["part"]
 title = (f"{chip(plant_level)} &nbsp;{SENSOR_NAMES.get(suspect, suspect)} off its expected value - {PARTS[now['part']]}"
          if now["alarm"] else f"{chip('Normal')} &nbsp;No fault this hour - closest to its threshold: "
                               f"{SENSOR_NAMES.get(suspect, suspect)}")
-st.markdown(f"<div class='panel-title' style='font-size:1.15rem'>Fault details &amp; diagnosis</div>"
+st.markdown(f"<div class='panel-title' style='font-size:1.15rem'>Fault details &amp; isolation</div>"
             f"<div style='margin-bottom:6px'>{title}</div>", unsafe_allow_html=True)
 
-detail, diagnosis = st.columns([3, 1])
+detail, isolation = st.columns([3, 1])
 with detail:
     tab_trend, tab_sensors, tab_scores = st.tabs(["Sensor trend", "Contributing sensors", "Detector scores"])
 
@@ -502,16 +502,25 @@ with detail:
         st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
         st.caption("One step per analysed hour; the gaps are hours when the chiller was off or days not shown.")
 
-with diagnosis:
+# --- Fault isolation: which detector, which part, which sensor ---
+def field(label, value, first=False):
+    return (f"<div style='margin-top:{0 if first else 12}px;font-size:0.85rem'>"
+            f"<span class='muted'>{label}</span><br>{value}</div>")
+
+
+with isolation:
     st.markdown(
-        f"<div class='panel'><div class='panel-title'>Diagnosis</div>"
-        f"<div class='muted' style='font-size:0.85rem'>Likely fault type and recommended checks will appear "
-        f"here once the diagnosis model is trained.</div>"
-        f"<div style='margin-top:14px;font-size:0.85rem'><span class='muted'>Detected by</span><br>"
-        f"{DETECTORS[owner][0]} (autoencoder, hourly max-z)</div>"
-        f"<div style='margin-top:10px;font-size:0.85rem'><span class='muted'>Part</span><br>{PARTS[now['part']]}</div>"
-        f"<div style='margin-top:10px;font-size:0.85rem'><span class='muted'>Sensor</span><br>"
-        f"<span class='mono'>{suspect}</span></div></div>", unsafe_allow_html=True)
+        f"<div class='panel'><div class='panel-title'>Fault isolation</div>"
+        + field("Status", chip(plant_level), first=True)
+        + field("Detected by", f"{DETECTORS[owner][0]}<br><span class='muted' style='font-size:0.78rem'>"
+                               f"autoencoder, hourly max-z</span>")
+        + field("Part", PARTS[now["part"]])
+        + field("Most-shifted sensor", f"{SENSOR_NAMES.get(suspect, suspect)}<br>"
+                                       f"<span class='mono muted' style='font-size:0.78rem'>{suspect}</span>")
+        + field("Shift vs threshold", f"<span class='mono'>{now['ratio']:.2f}×</span>")
+        + f"<div class='muted' style='margin-top:14px;font-size:0.75rem;border-top:1px solid {BORDER};"
+          f"padding-top:10px'>Shows where the fault appears in the data - not necessarily "
+          f"which component failed.</div></div>", unsafe_allow_html=True)
 
 if st.session_state.playing:
     time.sleep(delay)
