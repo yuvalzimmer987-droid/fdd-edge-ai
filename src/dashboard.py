@@ -139,7 +139,7 @@ def tile(column, title, alarm, detail):
         unsafe_allow_html=True)
 
 
-st.subheader(when(hour).strftime("%d %b, %H:00"))
+st.subheader(when(hour).strftime("%d %b, %H:00"), anchor=False)
 cols = st.columns(len(names) + 2)
 tile(cols[0], "Plant", now["alarm"],
      f"Fault in the {now['subsystem']}" if now["alarm"] else "All detectors below threshold")
@@ -156,30 +156,47 @@ with cols[-1]:
         f"<div style='font-size:0.85rem;opacity:0.8'>{suspect}</div></div>",
         unsafe_allow_html=True)
 
-# --- Timeline: score / threshold of each detector, up to the current hour ---
+# --- Timeline: score / threshold of each detector, every hour replayed so far ---
+# One step per analysed hour, so the hours when the plant was off (or days
+# that are not test days) take no space; lines break where time jumps.
 st.markdown("#### Detector scores over time")
-full = pd.RangeIndex(hours.index[0], hour + 1)          # gaps (plant off) break the lines
-past = hours.loc[:hour].reindex(full)
-x = [when(h) for h in full]
+past = hours.loc[:hour]
+hrs = past.index.to_numpy()
+jump = np.r_[False, np.diff(hrs) > 1]
+xs, ids = [], []
+for p, (h, j) in enumerate(zip(hrs, jump)):
+    if j:
+        xs.append(p - 0.5)
+        ids.append(None)                 # a gap in the line
+    xs.append(p)
+    ids.append(h)
+labels = [when(h).strftime("%d %b, %H:00") if h is not None else "" for h in ids]
 fig = go.Figure()
 for name in names:
+    ratio = past[f"score_{name}"] / detector.thresholds[name]
     fig.add_trace(go.Scatter(
-        x=x, y=past[f"score_{name}"] / detector.thresholds[name], name=LABELS[name].capitalize(),
-        mode="lines", line=dict(color=COLORS[name], width=2), connectgaps=False,
-        hovertemplate="%{y:.2f}× threshold<extra>" + LABELS[name] + "</extra>"))
-alarms = past[past["alarm"] == True]
+        x=xs, y=[ratio[h] if h is not None else None for h in ids], name=LABELS[name].capitalize(),
+        mode="lines", line=dict(color=COLORS[name], width=2), customdata=labels,
+        hovertemplate="%{customdata}<br>%{y:.2f}× threshold<extra>" + LABELS[name] + "</extra>"))
+alarm_pos = np.flatnonzero(past["alarm"].to_numpy())
 fig.add_trace(go.Scatter(
-    x=[when(h) for h in alarms.index], y=[0.15] * len(alarms), name="Alarm hour",
-    mode="markers", marker=dict(symbol="line-ns-open", size=10, color=CRITICAL, line=dict(width=2)),
-    customdata=alarms["suspect_sensor"],
-    hovertemplate="Alarm - suspect %{customdata}<extra></extra>"))
+    x=alarm_pos, y=[0.15] * len(alarm_pos), name="Alarm hour", mode="markers",
+    marker=dict(symbol="line-ns-open", size=10, color=CRITICAL, line=dict(width=2)),
+    customdata=np.c_[[when(h).strftime("%d %b, %H:00") for h in hrs[alarm_pos]],
+                     past["suspect_sensor"].to_numpy()[alarm_pos]],
+    hovertemplate="%{customdata[0]}<br>Alarm - suspect %{customdata[1]}<extra></extra>"))
 fig.add_hline(y=1, line=dict(color=GRAY, dash="dash", width=1),
               annotation_text="threshold", annotation_position="top left")
-fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), hovermode="x unified",
+day_start = np.flatnonzero(np.r_[True, np.diff(hrs // 24) > 0])
+day_start = day_start[::max(1, len(day_start) // 10)]     # at most ~10 date labels
+fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), hovermode="closest",
                   yaxis=dict(type="log", title="score ÷ threshold", gridcolor="rgba(128,128,128,0.15)",
                              tickvals=LOG_TICKS, ticktext=[f"{v:g}" for v in LOG_TICKS]),
-                  xaxis=dict(showgrid=False), legend=dict(orientation="h", y=1.12, x=0))
+                  xaxis=dict(tickvals=day_start, ticktext=[when(hrs[i]).strftime("%d %b") for i in day_start],
+                             gridcolor="rgba(128,128,128,0.15)", range=[-0.5, max(len(hrs) - 0.5, 24)]),
+                  legend=dict(orientation="h", y=1.12, x=0))
 st.plotly_chart(fig, width="stretch")
+st.caption("Each step is one hour with the chiller running; the gaps are hours or days that are not shown.")
 
 left, right = st.columns(2)
 
@@ -198,11 +215,13 @@ with left:
             x=part["ratio"], y=[SENSOR_NAMES.get(s, s) for s in part["sensor"]], orientation="h",
             name=LABELS[name].capitalize(), marker=dict(color=COLORS[name], cornerradius=4),
             hovertemplate="%{y}: %{x:.2f}× threshold<extra></extra>"))
-    fig.add_vline(x=1, line=dict(color=GRAY, dash="dash", width=1),
-                  annotation_text="threshold", annotation_position="bottom right")
-    fig.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), barmode="overlay",
+    fig.add_vline(x=1, line=dict(color=GRAY, dash="dash", width=1))
+    fig.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), barmode="overlay", showlegend=True,
                       yaxis=dict(categoryorder="array", categoryarray=[SENSOR_NAMES.get(s, s) for s in top["sensor"]]),
-                      xaxis=dict(title="shift ÷ detector threshold", gridcolor="rgba(128,128,128,0.15)"),
+                      xaxis=dict(type="log", title="shift ÷ detector threshold (dashed line = threshold)",
+                                 gridcolor="rgba(128,128,128,0.15)", tickvals=LOG_TICKS,
+                                 ticktext=[f"{v:g}" for v in LOG_TICKS],
+                                 range=[-1, np.log10(max(top["ratio"].max(), 2) * 1.5)]),
                       legend=dict(orientation="h", y=1.12, x=0))
     st.plotly_chart(fig, width="stretch")
 
