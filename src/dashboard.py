@@ -138,13 +138,15 @@ def events(hours, max_gap=3):
     alarm = hours[hours["alarm"]]
     out, current = [], None
     for h, row in alarm.iterrows():
+        alarmed = {p for p in PARTS if row[f"alarm_{p}"]}     # every part above its threshold
         if current is not None and h - current["end"] <= max_gap:
             current["end"] = h
             current["hours"] += 1
+            current["parts"] |= alarmed
             if row["ratio"] > current["ratio"]:
                 current.update(ratio=row["ratio"], part=row["part"], sensor=row["top_sensor"])
         else:
-            current = dict(start=h, end=h, hours=1, ratio=row["ratio"],
+            current = dict(start=h, end=h, hours=1, ratio=row["ratio"], parts=alarmed,
                            part=row["part"], sensor=row["top_sensor"])
             out.append(current)
     return out
@@ -371,12 +373,12 @@ with left:
         status = (f"<span class='chip' style='color:{TEAL};border-color:{TEAL}66'>● Open</span>" if is_open
                   else "<span class='muted'>Closed</span>")
         rows.append(f"<tr class='{'open' if is_open else ''}'><td class='mono'>{fmt(e['start'])}</td>"
-                    f"<td>{chip(severity(e['ratio']))}</td><td>{PARTS[e['part']]}</td>"
+                    f"<td>{chip(severity(e['ratio']))}</td><td>{'<br>'.join(PARTS[p] for p in PARTS if p in e['parts'])}</td>"
                     f"<td>{SENSOR_NAMES.get(e['sensor'], e['sensor'])}<br><span class='muted mono' style='font-size:0.72rem'>{e['sensor']}</span></td>"
                     f"<td class='mono'>{e['hours']} h</td><td class='mono'>{e['ratio']:.1f}×</td><td>{status}</td></tr>")
     body = "".join(rows) if rows else f"<tr><td colspan='7' class='muted'>No alarms so far.</td></tr>"
     st.markdown(f"<div class='panel'><div class='panel-title'>Fault events<small>alarm hours grouped into events</small></div>"
-                f"<table class='log'><tr><th>Started</th><th>Severity</th><th>Part</th><th>Most-shifted sensor</th>"
+                f"<table class='log'><tr><th>Started</th><th>Severity</th><th>Parts in alarm</th><th>Most-shifted sensor (peak)</th>"
                 f"<th>Duration</th><th>Peak</th><th>Status</th></tr>{body}</table></div>", unsafe_allow_html=True)
 
 
@@ -405,8 +407,9 @@ with right:
                     yaxis=dict(gridcolor=GRID, title="hours", dtick=6), xaxis=dict(type="category"))
         st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
-        st.markdown("<div class='panel-title'>Alarm hours by part</div>", unsafe_allow_html=True)
-        by_part = alarms["part"].value_counts().reindex(list(PARTS), fill_value=0)
+        st.markdown("<div class='panel-title'>Alarm hours by part<small>an hour counts for every part "
+                    "above its threshold</small></div>", unsafe_allow_html=True)
+        by_part = pd.Series({p: int(alarms[f"alarm_{p}"].sum()) for p in PARTS})
         fig = go.Figure(go.Bar(x=by_part.to_numpy(), y=[PARTS[p] for p in by_part.index], orientation="h",
                                marker=dict(color=TEAL, cornerradius=3), text=by_part.to_numpy(),
                                textposition="outside", cliponaxis=False,
