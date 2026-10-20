@@ -1,0 +1,10 @@
+# For the online dashboard (Streamlit Community Cloud): streamlit run src/dashboard.py
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+numpy
+pandas
+pyarrow
+scikit-learn
+joblib
+streamlit
+plotly

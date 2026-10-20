@@ -17,6 +17,12 @@ from preprocessing import DATA_DIR, load_plant_file, day_split, steady_state_mas
 
 START = pd.Timestamp("2021-01-01")       # the files hold one year of 1-minute data
 
+# Online demo (Streamlit Community Cloud): without the full data folder, read the
+# small pack made by make_demo_data.py (test days, steady operation only).
+DEMO_DIR = "demo_data"
+DEMO = not os.path.exists(f"{DATA_DIR}/ChillerPlant.csv") and os.path.exists(f"{DEMO_DIR}/file_catalog.csv")
+RESULTS_DIR = DEMO_DIR if DEMO else "data"
+
 # --- Look: dark control room, same palette as the presentation ---
 BG, PANEL, PANEL2, BORDER = "#0E1621", "#16212F", "#1C2A3C", "#26344A"
 TEXT, MUTED, TEAL, PIPE = "#E8EDF3", "#8796AB", "#3CC8BA", "#2A7F77"
@@ -92,7 +98,7 @@ def get_detector():
 
 @st.cache_data
 def get_catalog():
-    catalog = pd.read_csv("data/file_catalog.csv", dtype={"severity": str})
+    catalog = pd.read_csv(f"{RESULTS_DIR}/file_catalog.csv", dtype={"severity": str})
     names = {}
     for _, row in catalog.iterrows():
         if row["label"] == "normal":
@@ -107,13 +113,13 @@ def get_catalog():
 def get_performance(budget):
     """Detection and false alarms on test days, and the ONNX numbers, if the files exist."""
     perf = {}
-    if os.path.exists("data/hybrid_tradeoff.csv"):
-        t = pd.read_csv("data/hybrid_tradeoff.csv")
+    if os.path.exists(f"{RESULTS_DIR}/hybrid_tradeoff.csv"):
+        t = pd.read_csv(f"{RESULTS_DIR}/hybrid_tradeoff.csv")
         row = t.loc[(t["val_budget_pct"] - budget).abs().idxmin()]
         perf["detection"] = row["detection_all_test_pct"]
         perf["false_alarms"] = row["false_alarm_test_pct"]
-    if os.path.exists("data/edge_results.csv"):
-        e = pd.read_csv("data/edge_results.csv", index_col=0)
+    if os.path.exists(f"{RESULTS_DIR}/edge_results.csv"):
+        e = pd.read_csv(f"{RESULTS_DIR}/edge_results.csv", index_col=0)
         if "ONNX fp32" in e.index:
             perf["size_kb"] = e.at["ONNX fp32", "size_kb"]
             perf["latency_us"] = e.at["ONNX fp32", "latency_median_us"]
@@ -123,12 +129,16 @@ def get_performance(budget):
 @st.cache_data(show_spinner="Running the detector on the whole file...")
 def analyse(filename, test_days_only):
     detector = get_detector()
-    df = load_plant_file(f"{DATA_DIR}/{filename}", detector.load_columns())
-    keep, _, _, _ = steady_state_mask(df)
-    if test_days_only:
-        keep = keep & (day_split(len(df)) == "test")
-    idx = np.flatnonzero(keep)
-    frame = df.iloc[idx]
+    if DEMO:
+        frame = pd.read_parquet(f"{DEMO_DIR}/{filename.replace('.csv', '.parquet')}")
+        idx = frame.index.to_numpy()
+    else:
+        df = load_plant_file(f"{DATA_DIR}/{filename}", detector.load_columns())
+        keep, _, _, _ = steady_state_mask(df)
+        if test_days_only:
+            keep = keep & (day_split(len(df)) == "test")
+        idx = np.flatnonzero(keep)
+        frame = df.iloc[idx]
     z = detector.z_scores(frame, idx)
     hours = detector.hourly(frame, idx, z)
     if hours.empty:
@@ -211,8 +221,9 @@ with st.sidebar:
                 f"<div class='muted' style='font-size:0.8rem;margin-bottom:18px'>Replay of the LBNL chiller plant</div>",
                 unsafe_allow_html=True)
     filename = st.selectbox("Plant file", files, index=default, format_func=catalog.get)
-    test_days_only = st.toggle("Test days only", value=True,
-                               help="Days the models never saw in training or threshold setting.")
+    test_days_only = st.toggle("Test days only", value=True, disabled=DEMO,
+                               help="Days the models never saw in training or threshold setting."
+                                    + (" The online demo includes test days only." if DEMO else ""))
     step = st.select_slider("Hours per step", [1, 3, 6, 24], value=1)
     delay = st.select_slider("Seconds between steps", [0.2, 0.5, 1.0, 2.0], value=0.5)
     st.markdown(f"<div class='muted' style='font-size:0.78rem;margin-top:14px'>"

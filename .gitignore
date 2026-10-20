@@ -10,3 +10,6 @@ __pycache__/
 # Models (large binaries)
 models/*.onnx
 models/*.tflite
+
+# Small data pack for the online dashboard (make_demo_data.py)
+!demo_data/*.csv
