@@ -48,6 +48,21 @@ SENSOR_NAMES = {
 }
 
 
+def unit(sensor):
+    """Units we are sure of: temperatures in °F, powers in kW. The units of flows,
+    pressures, speeds and load are not given in the files, so they are left out."""
+    if "_TEMP" in sensor:
+        return "°F"
+    if "_POW" in sensor:
+        return "kW"
+    return ""
+
+
+def axis_label(sensor):
+    u = unit(sensor)
+    return f"{SENSOR_NAMES.get(sensor, sensor)} ({u})" if u else f"{SENSOR_NAMES.get(sensor, sensor)} ({sensor})"
+
+
 def severity(ratio):
     """How far above its threshold: < 2x Minor, < 5x Major, otherwise Critical."""
     if ratio <= 1:
@@ -450,18 +465,20 @@ with detail:
         for level in SEVERITIES:              # legend entries for the shaded hours
             fig.add_trace(go.Bar(x=[None], y=[None], name=f"{level} alarm",
                                  marker=dict(color=STATUS[level][0], opacity=0.5)))
-        base_layout(fig, 300, hovermode="x unified", yaxis=dict(title=suspect, gridcolor=GRID),
+        base_layout(fig, 300, hovermode="x unified", yaxis=dict(title=axis_label(suspect), gridcolor=GRID),
                     xaxis=dict(showgrid=False))
         st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
-        st.caption("Last 24 hours, steady chiller operation only (no line = chiller off or starting up). "
+        st.caption("x: time of day (one point per minute) · y: the sensor's reading. "
+                   "Last 24 hours, steady chiller operation only (no line = chiller off or starting up). "
                    "Shaded = alarm hour, colored by severity. No shading = no alarm, or fewer than "
                    "30 steady minutes in that hour, which is not scored.")
         latest = window[window.index >= hour * 60]
         dev = (latest[suspect] - detector.expected(latest, owner)[suspect]).mean()
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Measured (hour mean)", f"{latest[suspect].mean():.2f}")
-        m2.metric("Expected (hour mean)", f"{(latest[suspect] - dev).mean():.2f}")
-        m3.metric("Deviation", f"{dev:+.2f}")
+        u = f" {unit(suspect)}" if unit(suspect) else ""
+        m1.metric("Measured (hour mean)", f"{latest[suspect].mean():.2f}{u}")
+        m2.metric("Expected (hour mean)", f"{(latest[suspect] - dev).mean():.2f}{u}")
+        m3.metric("Deviation", f"{dev:+.2f}{u}")
         m4.metric("Shift vs threshold", f"{ratio.at[hour, suspect]:.2f}×")
 
     with tab_sensors:
