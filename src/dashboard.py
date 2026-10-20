@@ -444,10 +444,15 @@ with detail:
                                  line=dict(color=DETECTORS[owner][1], width=2)))
         fig.add_trace(go.Scatter(x=t, y=expected.where(~gaps), name="Expected by the model", mode="lines",
                                  line=dict(color=MUTED, width=2, dash="dash")))
-        fig.add_trace(go.Bar(x=[None], y=[None], name="Alarm hour", marker=dict(color=STATUS["Critical"][0], opacity=0.4)))
+        for level in SEVERITIES:              # legend entries for the shaded hours
+            fig.add_trace(go.Bar(x=[None], y=[None], name=f"{level} alarm",
+                                 marker=dict(color=STATUS[level][0], opacity=0.5)))
         base_layout(fig, 300, hovermode="x unified", yaxis=dict(title=suspect, gridcolor=GRID),
                     xaxis=dict(showgrid=False))
         st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+        st.caption("Last 24 hours, steady chiller operation only (no line = chiller off or starting up). "
+                   "Shaded = alarm hour, colored by severity. No shading = no alarm, or fewer than "
+                   "30 steady minutes in that hour, which is not scored.")
         latest = window[window.index >= hour * 60]
         dev = (latest[suspect] - detector.expected(latest, owner)[suspect]).mean()
         m1, m2, m3, m4 = st.columns(4)
