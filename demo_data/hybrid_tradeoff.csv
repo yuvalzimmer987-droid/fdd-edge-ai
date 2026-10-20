@@ -1,0 +1,5 @@
+val_budget_pct,percentile,false_alarm_val_pct,false_alarm_test_pct,detection_all_val_pct,detection_all_test_pct,detection_21_test_pct
+1.1,99.31,1.04,0.68,84.3,83.3,91.1
+2.0,98.96,1.73,1.69,85.8,84.5,92.3
+3.0,98.27,2.42,2.37,86.8,85.4,93.2
+5.0,97.23,4.5,4.41,88.4,86.8,94.5
