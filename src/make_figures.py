@@ -169,8 +169,9 @@ save(fig, "5_experiment_model_window", rect=(0, 0.07, 1, 1))
 edge = pd.read_csv("data/edge_results.csv", index_col=0)
 versions = edge.index.tolist()
 colors = [MUTED, BLUE, ORANGE][:len(versions)]
-metrics = [("size_kb", "Size (KB)"), ("latency_median_us", "Latency per row (µs, median)"),
-           ("energy_per_inference_mJ", "Energy per inference (mJ, est.)"),
+# export_model.py measures both detectors (main + pumps) per minute of data
+metrics = [("size_kb", "Size, both models (KB)"), ("latency_median_us", "Latency per minute of data (µs)"),
+           ("energy_per_minute_mJ", "Energy per minute of data (mJ, est.)"),
            ("detection_pct", "Hourly detection (%)")]
 
 fig, axes = plt.subplots(1, 4, figsize=(11, 3.4))
