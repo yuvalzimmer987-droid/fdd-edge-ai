@@ -323,7 +323,7 @@ if now["alarm"]:
              f"current weather and load, at {now['ratio']:.1f}× its alarm limit. "
              f"Alarm for {duration} analysed hour{'s' if duration > 1 else ''} so far.")
     line2 = (f"Most likely: <b>{FAULTS[likely[0]]['name']}</b>; also possible: "
-             f"{' or '.join(FAULTS[k]['name'].lower() for k in likely[1:])} - see the list of possible faults below."
+             f"{', or '.join(FAULTS[k]['name'].lower() for k in likely[1:])} - see the list of possible faults below."
              if likely else "")
 else:
     line1 = "<b>All monitored parts are running as expected</b> for the current weather and load."
