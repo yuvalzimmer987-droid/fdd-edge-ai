@@ -308,7 +308,11 @@ def difference_words(sensor, measured, expected):
 
 
 sigs = get_signatures()
-best = similarity.loc[hour].idxmax() if similarity is not None and now["alarm"] else None
+# The three most similar faults: on unseen days the right one is first in about 3 of 4
+# alarm hours and among the first three in nearly all (fault_signatures.py)
+likely = (list(similarity.loc[hour].sort_values(ascending=False).index[:3])
+          if similarity is not None and now["alarm"] else [])
+best = likely[0] if likely else None
 current_event = next((e for e in events(so_far)[::-1] if hour - e["end"] <= 3), None) if now["alarm"] else None
 measured, expected_now = hour_reading(hour, now["top_sensor"], now["part"])
 color, icon = STATUS[plant_level]
@@ -318,8 +322,9 @@ if now["alarm"]:
              f"reads <b>{difference_words(now['top_sensor'], measured, expected_now)}</b> than it should for the "
              f"current weather and load, at {now['ratio']:.1f}× its alarm limit. "
              f"Alarm for {duration} analysed hour{'s' if duration > 1 else ''} so far.")
-    line2 = (f"Most similar known fault: <b>{FAULTS[best]['name']}</b> - see the list of possible faults below."
-             if best else "")
+    line2 = (f"Most likely: <b>{FAULTS[likely[0]]['name']}</b>; also possible: "
+             f"{' or '.join(FAULTS[k]['name'].lower() for k in likely[1:])} - see the list of possible faults below."
+             if likely else "")
 else:
     line1 = "<b>All monitored parts are running as expected</b> for the current weather and load."
     line2 = "No sensor is beyond its alarm limit this hour."
@@ -646,7 +651,8 @@ with isolation:
         + field("Sensor", f"{SENSOR_NAMES.get(suspect, suspect)}<br>"
                           f"<span class='mono muted' style='font-size:0.78rem'>{suspect}</span>")
         + field("How unusual", f"<span class='mono'>{now['ratio']:.1f}×</span> the alarm limit")
-        + (field("Most similar known fault", f"<b>{FAULTS[best]['name']}</b>") if best else "")
+        + (field("Likely faults (most similar first)",
+                 "<br>".join(f"{i + 1}. {FAULTS[k]['name']}" for i, k in enumerate(likely))) if likely else "")
         + field("Detected by", f"{DETECTORS[owner][0]}<br><span class='muted' style='font-size:0.78rem'>"
                                f"autoencoder, hourly score</span>")
         + f"<div class='muted' style='margin-top:14px;font-size:0.75rem;border-top:1px solid {BORDER};"
