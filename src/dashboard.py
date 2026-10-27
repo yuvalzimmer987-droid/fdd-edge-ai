@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from detector import Detector
+from signatures import FAULTS, SIGNATURES_FILE, signature_vectors, load_signatures, match
 from preprocessing import DATA_DIR, load_plant_file, day_split, steady_state_mask
 
 # Operator dashboard: replays one plant file hour by hour, as if the data were
@@ -13,7 +14,8 @@ from preprocessing import DATA_DIR, load_plant_file, day_split, steady_state_mas
 # Run (from the project folder):  streamlit run src/dashboard.py
 # Needs: train_model.py and subsystems.py --hybrid run first.
 # Optional: data/hybrid_tradeoff.csv and data/edge_results.csv (from
-# subsystems.py --sweep and export_model.py) fill the performance tiles.
+# subsystems.py --sweep and export_model.py) fill the performance tiles, and
+# models/fault_signatures.json (fault_signatures.py) the possible-faults panel.
 
 START = pd.Timestamp("2021-01-01")       # the files hold one year of 1-minute data
 
@@ -39,6 +41,7 @@ DETECTORS = {"main": ("Main model", BLUE), "pumps": ("Pump detector", ORANGE)}
 # and the cooling tower together (they are coupled through the condenser loop,
 # and separate models detected less), the pump detector watches the pumping loop.
 PARTS = {"main": "Chiller & cooling tower", "pumps": "Pumps & chilled-water loop"}
+SHORT = {"main": "Chiller & tower", "pumps": "Pumps & loop"}
 SENSOR_NAMES = {
     "CHL_SW_TEMP_1": "Chiller supply water temp", "CHL_RW_TEMP_1": "Chiller return water temp",
     "CHL_SWCD_TEMP_1": "Condenser supply water temp", "CHL_RWCD_TEMP_1": "Condenser return water temp",
@@ -109,6 +112,11 @@ def get_catalog():
     return names
 
 
+@st.cache_resource
+def get_signatures():
+    return load_signatures() if os.path.exists(SIGNATURES_FILE) else None
+
+
 @st.cache_data
 def get_performance(budget):
     """Detection and false alarms on test days, and the ONNX numbers, if the files exist."""
@@ -139,10 +147,14 @@ def analyse(filename, test_days_only):
             keep = keep & (day_split(len(df)) == "test")
         idx = np.flatnonzero(keep)
         frame = df.iloc[idx]
-    z = detector.z_scores(frame, idx)
+    signed = detector.signed_z_scores(frame, idx)
+    z = {n: v.abs() for n, v in signed.items()}
     hours = detector.hourly(frame, idx, z)
     if hours.empty:
-        return frame, hours, None, None
+        return frame, hours, None, None, None
+    # How much each hour's pattern of sensor changes looks like each known fault
+    sigs = get_signatures()
+    similarity = match(signature_vectors(signed), sigs) if sigs else None
     # Every sensor's shift in units of its detector's threshold (> 1 = above threshold).
     # A few sensors are in both detectors: keep the larger value.
     per_detector = {n: z[n] / detector.thresholds[n] for n in z}
@@ -155,7 +167,7 @@ def analyse(filename, test_days_only):
     hours["ratio"] = part_ratio.max(axis=1)
     hours["top_sensor"] = [hours.at[h, f"sensor_{p}"] for h, p in hours["part"].items()]
     hours["severity"] = hours["ratio"].map(severity)
-    return frame, hours, ratio, part_ratio
+    return frame, hours, ratio, part_ratio, similarity
 
 
 def events(hours, max_gap=3):
@@ -227,12 +239,12 @@ with st.sidebar:
     step = st.select_slider("Hours per step", [1, 3, 6, 24], value=1)
     delay = st.select_slider("Seconds between steps", [0.2, 0.5, 1.0, 2.0], value=0.5)
     st.markdown(f"<div class='muted' style='font-size:0.78rem;margin-top:14px'>"
-                f"Severity = how far the most-shifted sensor is above its threshold: "
+                f"Severity = how far a sensor is beyond its alarm limit: "
                 f"{chip('Minor', 'Minor &lt;2×')} {chip('Major', 'Major &lt;5×')} {chip('Critical', 'Critical ≥5×')}"
-                f"<br><br>Thresholds: {detector.budget:g}% false-alarm budget on normal hours.</div>",
+                f"<br><br>Alarm limits are set so that only {detector.budget:g}% of normal hours would raise an alarm.</div>",
                 unsafe_allow_html=True)
 
-frame, hours, ratio, part_ratio = analyse(filename, test_days_only)
+frame, hours, ratio, part_ratio, similarity = analyse(filename, test_days_only)
 if hours.empty:
     st.warning("No steady-state hours in this selection.")
     st.stop()
@@ -278,6 +290,44 @@ c2.button("❚❚ Pause" if st.session_state.playing else "▶ Play", on_click=t
 c3.button("Next ▶", on_click=move, args=(step,), width="stretch")
 c4.slider("Hour", 0, n - 1, key="pos", label_visibility="collapsed")
 
+# --- What's happening now: one plain sentence ---
+def hour_reading(h, sensor, part):
+    """Mean measured and expected value of a sensor over one analysed hour."""
+    rows = frame[(frame.index >= h * 60) & (frame.index < (h + 1) * 60)]
+    return rows[sensor].mean(), detector.expected(rows, part)[sensor].mean()
+
+
+def difference_words(sensor, measured, expected):
+    """'4.2 °F colder', '12% higher' - the gap between what a sensor reads and what it should."""
+    gap = measured - expected
+    if "_TEMP" in sensor:
+        return f"{abs(gap):.1f} °F {'warmer' if gap > 0 else 'colder'}"
+    if unit(sensor):
+        return f"{abs(gap):.1f} {unit(sensor)} {'higher' if gap > 0 else 'lower'}"
+    return f"{abs(gap / expected) * 100:.0f}% {'higher' if gap > 0 else 'lower'}"
+
+
+sigs = get_signatures()
+best = similarity.loc[hour].idxmax() if similarity is not None and now["alarm"] else None
+current_event = next((e for e in events(so_far)[::-1] if hour - e["end"] <= 3), None) if now["alarm"] else None
+measured, expected_now = hour_reading(hour, now["top_sensor"], now["part"])
+color, icon = STATUS[plant_level]
+if now["alarm"]:
+    duration = current_event["hours"] if current_event else 1
+    line1 = (f"<b>{PARTS[now['part']]}:</b> the {SENSOR_NAMES.get(now['top_sensor'], now['top_sensor']).lower()} "
+             f"reads <b>{difference_words(now['top_sensor'], measured, expected_now)}</b> than it should for the "
+             f"current weather and load, at {now['ratio']:.1f}× its alarm limit. "
+             f"Alarm for {duration} analysed hour{'s' if duration > 1 else ''} so far.")
+    line2 = (f"Most similar known fault: <b>{FAULTS[best]['name']}</b> - see the list of possible faults below."
+             if best else "")
+else:
+    line1 = "<b>All monitored parts are running as expected</b> for the current weather and load."
+    line2 = "No sensor is beyond its alarm limit this hour."
+st.markdown(f"<div class='panel' style='border-left:6px solid {color};margin-bottom:14px'>"
+            f"<div class='kpi-label'>WHAT IS HAPPENING NOW</div>"
+            f"<div style='font-size:1.15rem;line-height:1.5;color:{TEXT};margin-top:4px'>{icon} {line1}</div>"
+            f"<div class='muted' style='margin-top:4px'>{line2}</div></div>", unsafe_allow_html=True)
+
 # --- KPI tiles ---
 perf = get_performance(detector.budget)
 alarm_parts = [p for p in part_ratio.columns if part_ratio.at[hour, p] > 1]
@@ -295,15 +345,15 @@ color, icon = STATUS[plant_level]
 kpi(k1, icon, color, "Plant status", "Normal" if plant_level == "Normal" else f"{plant_level} alarm",
     "all parts below threshold" if not alarm_parts else
     f"{len(alarm_parts)} part{'s' if len(alarm_parts) > 1 else ''} in alarm")
-kpi(k2, "◷", TEAL, "Alarm hours in this replay", f"{int(so_far['alarm'].sum())} / {len(so_far)}",
-    f"{so_far['alarm'].mean() * 100:.1f}% of analysed hours")
-kpi(k3, "◎", TEAL, "Detector on test days",
-    f"{perf['detection']:.1f}%" if "detection" in perf else "-",
-    f"faults detected · {perf['false_alarms']:.2f}% false alarms" if "detection" in perf
+kpi(k2, "◷", TEAL, "Hours with an alarm so far", f"{int(so_far['alarm'].sum())} / {len(so_far)}",
+    f"{so_far['alarm'].mean() * 100:.1f}% of the hours replayed")
+kpi(k3, "◎", TEAL, "How reliable is the detector?",
+    f"{perf['detection']:.0f}% found" if "detection" in perf else "-",
+    f"of fault hours on unseen days · {perf['false_alarms']:.1f}% false alarms" if "detection" in perf
     else "run subsystems.py --hybrid --sweep")
-kpi(k4, "⚡", TEAL, "Edge inference (ONNX)",
+kpi(k4, "⚡", TEAL, "Runs on a small edge device",
     f"{perf['latency_us']:.0f} µs / min" if "latency_us" in perf else "1-hour windows",
-    f"{perf['size_kb']:.1f} KB for both models · decision every hour" if "size_kb" in perf
+    f"of data · {perf['size_kb']:.0f} KB for both models" if "size_kb" in perf
     else "run export_model.py for edge numbers")
 
 st.write("")
@@ -372,6 +422,49 @@ plant_svg = (
 st.markdown(f"<div class='panel'><div class='panel-title'>Plant overview<small>chilled water ← · → condenser water · one status per detector</small></div>"
             f"{plant_svg}</div>", unsafe_allow_html=True)
 
+# --- Possible faults vs. what the plant is doing now ---
+if sigs is None:
+    st.info("Possible faults: run python src/fault_signatures.py to learn the fault signatures.")
+else:
+    order = list(FAULTS)
+    if now["alarm"]:
+        order = list(similarity.loc[hour].sort_values(ascending=False).index)
+    rows = []
+    for k in order:
+        f = FAULTS[k]
+        if now["alarm"]:
+            m = max(0.0, float(similarity.at[hour, k]))
+            top_one = k == order[0]
+            bar_color = TEAL if top_one else "#3A4A61"
+            cell = (f"<div style='display:flex;align-items:center;gap:8px'><div style='flex:1;background:{PANEL2};"
+                    f"border-radius:4px;height:10px'><div style='width:{m * 100:.0f}%;background:{bar_color};"
+                    f"height:10px;border-radius:4px'></div></div><span class='mono' style='width:38px'>{m * 100:.0f}%</span></div>"
+                    + (f"<span class='chip' style='color:{TEAL};border-color:{TEAL}66;margin-top:4px'>Most similar</span>"
+                       if top_one else ""))
+        else:
+            cell = "<span class='muted'>-</span>"
+        rows.append(f"<tr><td>{f['where']}</td><td><b>{f['name']}</b><br><span class='muted' style='font-size:0.78rem'>"
+                    f"{f['what']}</span></td><td class='muted' style='font-size:0.8rem'>{f['looks']}</td>"
+                    f"<td style='width:190px'>{cell}</td></tr>")
+    acc = sigs.get("accuracy", {})
+    note = (f"Each fault moves the sensors in its own pattern. This hour's pattern is compared with the typical "
+            f"pattern of each fault, learned from labelled examples. On days the models never saw, the most similar "
+            f"fault was the right one in {acc.get('top1_pct', 0):.0f}% of alarm hours, and among the top three in "
+            f"{acc.get('top3_pct', 0):.0f}%. A fault that is not in this list cannot be recognised.")
+    status_words = ("Ranked by how closely this hour matches each fault" if now["alarm"] else
+                    "No alarm this hour, so the plant matches normal operation; matching runs when an alarm is raised")
+    header = ("<tr><th>Where</th><th>Possible fault</th><th>What it would look like</th>"
+              "<th>Match with this hour</th></tr>")
+    shown = rows[:5] if now["alarm"] else rows        # in an alarm: the five closest first
+    st.markdown(f"<div class='panel' style='margin-top:14px'><div class='panel-title'>Possible faults vs. what the "
+                f"plant is doing now<small>{status_words}</small></div>"
+                f"<table class='log'>{header}{''.join(shown)}</table>"
+                f"<div class='muted' style='font-size:0.75rem;margin-top:10px'>{note}</div></div>",
+                unsafe_allow_html=True)
+    if len(rows) > len(shown):
+        with st.expander(f"{len(rows) - len(shown)} less similar faults"):
+            st.markdown(f"<table class='log'>{header}{''.join(rows[len(shown):])}</table>", unsafe_allow_html=True)
+
 # --- Plant pulse: the last 72 analysed hours, one cell per hour ---
 recent = hours.iloc[max(0, pos - 71):pos + 1]
 cells = []
@@ -399,13 +492,13 @@ with left:
         status = (f"<span class='chip' style='color:{TEAL};border-color:{TEAL}66'>● Open</span>" if is_open
                   else "<span class='muted'>Closed</span>")
         rows.append(f"<tr class='{'open' if is_open else ''}'><td class='mono'>{fmt(e['start'])}</td>"
-                    f"<td>{chip(severity(e['ratio']))}</td><td>{'<br>'.join(PARTS[p] for p in PARTS if p in e['parts'])}</td>"
+                    f"<td>{chip(severity(e['ratio']))}</td><td style='white-space:nowrap'>{'<br>'.join(SHORT[p] for p in PARTS if p in e['parts'])}</td>"
                     f"<td>{SENSOR_NAMES.get(e['sensor'], e['sensor'])}<br><span class='muted mono' style='font-size:0.72rem'>{e['sensor']}</span></td>"
                     f"<td class='mono'>{e['hours']} h</td><td class='mono'>{e['ratio']:.1f}×</td><td>{status}</td></tr>")
     body = "".join(rows) if rows else f"<tr><td colspan='7' class='muted'>No alarms so far.</td></tr>"
     st.markdown(f"<div class='panel'><div class='panel-title'>Fault events<small>alarm hours grouped into events</small></div>"
-                f"<table class='log'><tr><th>Started</th><th>Severity</th><th>Parts in alarm</th><th>Most-shifted sensor (peak)</th>"
-                f"<th>Duration</th><th>Peak</th><th>Status</th></tr>{body}</table></div>", unsafe_allow_html=True)
+                f"<table class='log'><tr><th>Started</th><th>Severity</th><th>Parts in alarm</th><th>Where it shows (peak hour)</th>"
+                f"<th>Duration</th><th>Peak (× limit)</th><th>Status</th></tr>{body}</table></div>", unsafe_allow_html=True)
 
 
 def base_layout(fig, height, **kw):
@@ -448,50 +541,51 @@ with right:
 st.write("")
 suspect = now["top_sensor"]
 owner = now["part"]
-title = (f"{chip(plant_level)} &nbsp;{SENSOR_NAMES.get(suspect, suspect)} off its expected value - {PARTS[now['part']]}"
-         if now["alarm"] else f"{chip('Normal')} &nbsp;No fault this hour - closest to its threshold: "
+title = (f"{chip(plant_level)} &nbsp;{SENSOR_NAMES.get(suspect, suspect)} is off what it should read - {PARTS[now['part']]}"
+         if now["alarm"] else f"{chip('Normal')} &nbsp;No alarm this hour - the sensor closest to its limit: "
                               f"{SENSOR_NAMES.get(suspect, suspect)}")
-st.markdown(f"<div class='panel-title' style='font-size:1.15rem'>Fault details &amp; isolation</div>"
+st.markdown(f"<div class='panel-title' style='font-size:1.15rem'>This hour in detail</div>"
             f"<div style='margin-bottom:6px'>{title}</div>", unsafe_allow_html=True)
 
 detail, isolation = st.columns([3, 1])
 with detail:
-    tab_trend, tab_sensors, tab_scores = st.tabs(["Sensor trend", "Contributing sensors", "Detector scores"])
+    st.markdown("<div class='panel-title'>What the sensor reads vs. what it should read</div>",
+                unsafe_allow_html=True)
+    idx = frame.index.to_numpy()
+    window = frame[(idx >= (hour - 23) * 60) & (idx < (hour + 1) * 60)]
+    expected = detector.expected(window, owner)[suspect]
+    t = [START + pd.Timedelta(minutes=int(i)) for i in window.index]
+    gaps = np.diff(window.index.to_numpy(), prepend=window.index[0]) > 1
+    fig = go.Figure()
+    for h in hours.index[(hours.index >= hour - 23) & (hours.index <= hour)]:
+        if hours.at[h, "alarm"]:
+            fig.add_vrect(x0=when(h), x1=when(h + 1), fillcolor=STATUS[hours.at[h, "severity"]][0],
+                          opacity=0.13, line_width=0)
+    fig.add_trace(go.Scatter(x=t, y=window[suspect].where(~gaps), name="Measured", mode="lines",
+                             line=dict(color=DETECTORS[owner][1], width=2)))
+    fig.add_trace(go.Scatter(x=t, y=expected.where(~gaps), name="What it should read (model)", mode="lines",
+                             line=dict(color=MUTED, width=2, dash="dash")))
+    for level in SEVERITIES:              # legend entries for the shaded hours
+        fig.add_trace(go.Bar(x=[None], y=[None], name=f"{level} alarm",
+                             marker=dict(color=STATUS[level][0], opacity=0.5)))
+    base_layout(fig, 300, hovermode="x unified", yaxis=dict(title=axis_label(suspect), gridcolor=GRID),
+                xaxis=dict(showgrid=False))
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+    st.caption("x: time of day (one point per minute) · y: the sensor's reading. "
+               "Last 24 hours, steady chiller operation only (no line = chiller off or starting up). "
+               "Shaded = alarm hour, colored by severity. No shading = no alarm, or fewer than "
+               "30 steady minutes in that hour, which is not scored.")
+    latest = window[window.index >= hour * 60]
+    dev = (latest[suspect] - detector.expected(latest, owner)[suspect]).mean()
+    m1, m2, m3, m4 = st.columns(4)
+    u = f" {unit(suspect)}" if unit(suspect) else ""
+    m1.metric("Reads (hour mean)", f"{latest[suspect].mean():.2f}{u}")
+    m2.metric("Should read (hour mean)", f"{(latest[suspect] - dev).mean():.2f}{u}")
+    m3.metric("Difference", f"{dev:+.2f}{u}")
+    m4.metric("How unusual (× alarm limit)", f"{ratio.at[hour, suspect]:.1f}×")
 
-    with tab_trend:
-        idx = frame.index.to_numpy()
-        window = frame[(idx >= (hour - 23) * 60) & (idx < (hour + 1) * 60)]
-        expected = detector.expected(window, owner)[suspect]
-        t = [START + pd.Timedelta(minutes=int(i)) for i in window.index]
-        gaps = np.diff(window.index.to_numpy(), prepend=window.index[0]) > 1
-        fig = go.Figure()
-        for h in hours.index[(hours.index >= hour - 23) & (hours.index <= hour)]:
-            if hours.at[h, "alarm"]:
-                fig.add_vrect(x0=when(h), x1=when(h + 1), fillcolor=STATUS[hours.at[h, "severity"]][0],
-                              opacity=0.13, line_width=0)
-        fig.add_trace(go.Scatter(x=t, y=window[suspect].where(~gaps), name="Measured", mode="lines",
-                                 line=dict(color=DETECTORS[owner][1], width=2)))
-        fig.add_trace(go.Scatter(x=t, y=expected.where(~gaps), name="Expected by the model", mode="lines",
-                                 line=dict(color=MUTED, width=2, dash="dash")))
-        for level in SEVERITIES:              # legend entries for the shaded hours
-            fig.add_trace(go.Bar(x=[None], y=[None], name=f"{level} alarm",
-                                 marker=dict(color=STATUS[level][0], opacity=0.5)))
-        base_layout(fig, 300, hovermode="x unified", yaxis=dict(title=axis_label(suspect), gridcolor=GRID),
-                    xaxis=dict(showgrid=False))
-        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
-        st.caption("x: time of day (one point per minute) · y: the sensor's reading. "
-                   "Last 24 hours, steady chiller operation only (no line = chiller off or starting up). "
-                   "Shaded = alarm hour, colored by severity. No shading = no alarm, or fewer than "
-                   "30 steady minutes in that hour, which is not scored.")
-        latest = window[window.index >= hour * 60]
-        dev = (latest[suspect] - detector.expected(latest, owner)[suspect]).mean()
-        m1, m2, m3, m4 = st.columns(4)
-        u = f" {unit(suspect)}" if unit(suspect) else ""
-        m1.metric("Measured (hour mean)", f"{latest[suspect].mean():.2f}{u}")
-        m2.metric("Expected (hour mean)", f"{(latest[suspect] - dev).mean():.2f}{u}")
-        m3.metric("Deviation", f"{dev:+.2f}{u}")
-        m4.metric("Shift vs threshold", f"{ratio.at[hour, suspect]:.2f}×")
-
+    engineers = st.expander("Details for engineers: all sensors and both detector scores")
+    tab_sensors, tab_scores = engineers.tabs(["Contributing sensors", "Detector scores"])
     with tab_sensors:
         top = ratio.loc[hour].nlargest(8)[::-1]
         fig = go.Figure(go.Bar(
@@ -546,14 +640,15 @@ def field(label, value, first=False):
 
 with isolation:
     st.markdown(
-        f"<div class='panel'><div class='panel-title'>Fault isolation</div>"
+        f"<div class='panel'><div class='panel-title'>Where the fault shows</div>"
         + field("Status", chip(plant_level), first=True)
-        + field("Detected by", f"{DETECTORS[owner][0]}<br><span class='muted' style='font-size:0.78rem'>"
-                               f"autoencoder, hourly max-z</span>")
         + field("Part", PARTS[now["part"]])
-        + field("Most-shifted sensor", f"{SENSOR_NAMES.get(suspect, suspect)}<br>"
-                                       f"<span class='mono muted' style='font-size:0.78rem'>{suspect}</span>")
-        + field("Shift vs threshold", f"<span class='mono'>{now['ratio']:.2f}×</span>")
+        + field("Sensor", f"{SENSOR_NAMES.get(suspect, suspect)}<br>"
+                          f"<span class='mono muted' style='font-size:0.78rem'>{suspect}</span>")
+        + field("How unusual", f"<span class='mono'>{now['ratio']:.1f}×</span> the alarm limit")
+        + (field("Most similar known fault", f"<b>{FAULTS[best]['name']}</b>") if best else "")
+        + field("Detected by", f"{DETECTORS[owner][0]}<br><span class='muted' style='font-size:0.78rem'>"
+                               f"autoencoder, hourly score</span>")
         + f"<div class='muted' style='margin-top:14px;font-size:0.75rem;border-top:1px solid {BORDER};"
           f"padding-top:10px'>Shows where the fault appears in the data - not necessarily "
           f"which component failed.</div></div>", unsafe_allow_html=True)

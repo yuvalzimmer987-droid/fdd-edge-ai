@@ -104,14 +104,19 @@ class Detector:
         """Columns to read from a plant CSV (CHL_POW_1 for the steady-state mask)."""
         return sorted({c for cols in self.columns.values() for c in cols} | {"CHL_POW_1"})
 
-    def z_scores(self, frame, idx):
-        """Per detector: |z| of every sensor's hourly mean residual."""
+    def signed_z_scores(self, frame, idx):
+        """Per detector: z of every sensor's hourly mean residual, with its sign
+        (the direction a sensor moved is part of a fault's signature)."""
         z = {}
         for name, predict in self.predictors.items():
             x = self.scalers[name].transform(frame[self.columns[name]]).astype(np.float32)
             win = window_means(idx, predict(x) - x, self.columns[name])
-            z[name] = ((win - self.center[name]) / self.spread[name]).abs()
+            z[name] = (win - self.center[name]) / self.spread[name]
         return z
+
+    def z_scores(self, frame, idx):
+        """Per detector: |z| of every sensor's hourly mean residual."""
+        return {name: z.abs() for name, z in self.signed_z_scores(frame, idx).items()}
 
     def calibrate(self, frame, idx, budget):
         """Fit the z-scores and thresholds on normal validation rows (steady state)."""
